@@ -1,15 +1,17 @@
-from dataclasses import dataclass
+from pathlib import Path
+import sys
 
+if __package__ is None or __package__ == "":
+    project_root = Path(__file__).resolve().parents[2]
+    project_root_str = str(project_root)
+    if project_root_str not in sys.path:
+        sys.path.insert(0, project_root_str)
+        
+from dataclasses import dataclass
+from qarith.types import AdderResources
+from qarith.resources.helpers import getGateCount
 from qiskit import QuantumCircuit, QuantumRegister
 from qiskit.quantum_info import Operator
-
-@dataclass
-class AdderResources:
-    """Simple container for resource estimates of an n-bit adder."""
-    n_bits: int
-    toffoli_count: int
-    cnot_count: int
-    ancilla_count: int
 
 def naive_ripple_adder_resources(n: int) -> AdderResources:
     """Return a rough resource estimate for the naive ripple-carry adder.
@@ -196,33 +198,15 @@ def inplace_ripple_adder_circuit(n: int) -> QuantumCircuit:
     inplace_ripple_adder(circ, x, y, c)
     return circ
 
-def getGateCount(circ):
-    raw_counts = circ.count_ops()
-    ops = {}
-    for k, v in raw_counts.items():
-        if isinstance(k, str):
-            key = k
-        else:
-            # Instruction-like keys typically expose a 'name' attribute
-            key = getattr(k, "name", str(k))
-        ops[key] = v
-
-    num_ccx = ops.get("ccx", 0)
-    num_cx = ops.get("cx", 0)
-    return num_ccx, num_cx
-
 def run(n):
-    #circ = naive_ripple_adder_circuit(n)
-    circ = inplace_ripple_adder_circuit(n)
+    circ = naive_ripple_adder_circuit(n)
     print(circ)
-    #resources = naive_ripple_adder_resources(n)
-    resources = inplace_ripple_adder_resources(n)
+    resources = naive_ripple_adder_resources(n)
     print("\nResource estimate (model):", resources)
 
     # Count actual gates in the constructed circuit
-    # Normalize the keys from circ.count_ops() to string names so .get(...) accepts string keys
     num_ccx, num_cx = getGateCount(circ)
     print(f"Actual gate counts in circuit: ccx={num_ccx}, cx={num_cx}")
 
 if __name__ == "__main__":
-    run(3)
+    run(2)
