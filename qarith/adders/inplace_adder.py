@@ -7,10 +7,10 @@ if __package__ is None or __package__ == "":
     if project_root_str not in sys.path:
         sys.path.insert(0, project_root_str)
 
-from qarith.types import AdderResources
-from qarith.resources.helpers import getGateCount
 from qiskit import QuantumCircuit, QuantumRegister
-from qiskit.quantum_info import Operator
+
+from qarith.adders.base import Adder
+from qarith.types import AdderResources
 
 def inplace_ripple_adder_resources(n: int) -> AdderResources:
     """
@@ -100,15 +100,25 @@ def inplace_ripple_adder_circuit(n: int) -> QuantumCircuit:
     inplace_ripple_adder(circ, x, y, c)
     return circ
 
-def run(n):
-    circ = inplace_ripple_adder_circuit(n)
-    print(circ)
-    resources = inplace_ripple_adder_resources(n)
-    print("\nResource estimate (model):", resources)
+class InplaceRippleAdder(Adder):
+    """In-place ripple-carry adder."""
 
-    # Count actual gates in the constructed circuit
-    num_ccx, num_cx = getGateCount(circ)
-    print(f"Actual gate counts in circuit: ccx={num_ccx}, cx={num_cx}")
+    def build_circuit(self) -> QuantumCircuit:
+        return inplace_ripple_adder_circuit(self.n_bits)
+
+    def resource_estimate(self) -> AdderResources:
+        return inplace_ripple_adder_resources(self.n_bits)
+
+
+def run(n: int) -> None:
+    adder = InplaceRippleAdder(n)
+    profile = adder.characterize()
+    #print(profile.circuit)
+    print("\nResource estimate (model):", profile.resource_estimate)
+    print(
+        "Actual gate counts in circuit: "
+        f"ccx={profile.ccx_count}, cx={profile.cx_count}",
+    )
 
 if __name__ == "__main__":
     run(2)
