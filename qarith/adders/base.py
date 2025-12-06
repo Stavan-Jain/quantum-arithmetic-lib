@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from qiskit import QuantumCircuit
 
 from qarith.resources.helpers import getGateCount
-from qarith.types import AdderResources
+from qarith.adders.types import AdderResources
 
 
 @dataclass

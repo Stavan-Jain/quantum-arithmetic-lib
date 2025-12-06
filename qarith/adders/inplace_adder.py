@@ -10,7 +10,7 @@ if __package__ is None or __package__ == "":
 from qiskit import QuantumCircuit, QuantumRegister
 
 from qarith.adders.base import Adder
-from qarith.types import AdderResources
+from qarith.adders.types import AdderResources
 
 def inplace_ripple_adder_resources(n: int) -> AdderResources:
     """

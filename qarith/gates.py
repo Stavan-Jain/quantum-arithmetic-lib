@@ -1,4 +1,8 @@
 from qiskit import QuantumCircuit
+from typing import List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .register import QRegister
 
 
 class Circuit:
@@ -24,7 +28,20 @@ class Circuit:
             self.qc.cx(qs[0], qs[1])
         elif name == "CCX":
             self.qc.ccx(qs[0], qs[1], qs[2])
-        elif name in ("CMP_CONST", "SUB_CONST_IF", "CMUL_CONST_MOD", "COMMENT"):
+        elif name in (
+            "CMP_CONST",
+            "SUB_CONST_IF",
+            "CMUL_CONST_MOD",
+            "CMUL_MOD",
+            "CPOW_MOD",
+            "CDIV_MOD",
+            "CMUL_CONST",
+            "CPOW_CONST",
+            "CDIV_CONST",
+            "CPOW_CONST_MOD",
+            "CDIV_CONST_MOD",
+            "COMMENT",
+        ):
             # keep as barriers/labels so you can still see structure
             self.qc.barrier(*[q for q in qs if q >= 0])
         else:
@@ -33,17 +50,34 @@ class Circuit:
     def pretty_print(self):
         print(self.qc.draw())  # text diagram; use .draw('mpl') in a notebook
 
+    def measure(self, registers: List["QRegister"] = None):
+        """
+        Add measurement operations to the circuit.
 
-# shorthands for primitive gates
+        Args:
+            registers: List of QRegister objects to measure. If None, measures all qubits.
+        """
+        if registers is None:
+            # Measure all qubits (this automatically creates classical bits)
+            self.qc.measure_all()
+        else:
+            # Measure specific registers
+            # First, ensure we have enough classical bits
+            total_bits_needed = sum(reg.n_bits for reg in registers)
+            current_cbits = self.qc.num_clbits
 
+            # Add classical bits if needed
+            if total_bits_needed > current_cbits:
+                from qiskit import ClassicalRegister
 
-def x(circ: Circuit, t: int):
-    circ.add("X", t)
+                cr = ClassicalRegister(total_bits_needed - current_cbits)
+                self.qc.add_register(cr)
 
-
-def cx(circ: Circuit, c: int, t: int):
-    circ.add("CX", c, t)
-
-
-def ccx(circ: Circuit, c1: int, c2: int, t: int):
-    circ.add("CCX", c1, c2, t)
+            # Now measure each register
+            cbit_offset = 0
+            for reg in registers:
+                bits = reg.bits()
+                for i, q in enumerate(bits):
+                    c = cbit_offset + i
+                    self.qc.measure(q, c)
+                cbit_offset += len(bits)
