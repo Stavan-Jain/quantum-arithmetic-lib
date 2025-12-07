@@ -118,7 +118,6 @@ class NaiveRippleAdder(Adder):
     def resource_estimate(self) -> AdderResources:
         return naive_ripple_adder_resources(self.n_bits)
 
-
 def run(n: int) -> None:
     adder = NaiveRippleAdder(n)
     profile = adder.characterize()
