@@ -1,42 +1,19 @@
-from qarith.prog import Program
+from qarith.expr import Basic
 from qarith.qtype import Mod
+from tests.ecc import ecc_add
+from tests.simple import simple_addition
 
 
 def main():
-    # Create a program context
-    prog = Program()
+    # Create Basic expressions as inputs
+    x1 = Basic("x1", Mod(11))
+    y1 = Basic("y1", Mod(11))
+    x2 = Basic("x2", Mod(11))
+    y2 = Basic("y2", Mod(11))
 
-    # Declare variables naturally - no need to specify names!
-    a = prog.declare_var(Mod(11))
-    b = prog.declare_var(Mod(11))
-
-    # Initialize variables using assign() method
-    # Note: Due to Python limitations, we can't intercept 'a = 0' directly
-    # Use one of these alternatives:
-    a.assign(1)  # Method 1: explicit assign
-    prog[b] = 1  # Method 2: using program indexing
-    a.assign(a + b)
-
-    # # In-place operators automatically add operations
-    # a += b  # Addition
-    # a -= b  # Subtraction
-    # a *= b  # Multiplication
-    # a **= b  # Exponentiation
-    # a //= b  # Floor division
-
-    # Compile and run the circuit
-    print("Compiling circuit...")
-    circ = prog.compile()
-    print("Circuit (all operations):")
-    print("Total qubits:", circ.n_qubits)
-    circ.pretty_print()
-
-    # Run the circuit and get results
-    print("\nRunning circuit...")
-    results = prog.run(shots=1024)
-    print("Results:", results)
-    print(f"Final value of a: {results.get('var_0', 'N/A')}")
-    print(f"Final value of b: {results.get('var_1', 'N/A')}")
+    x3 = simple_addition(x1, x2)
+    print("x3: ", x3)
+    print(x3.circuit())
 
 
 if __name__ == "__main__":

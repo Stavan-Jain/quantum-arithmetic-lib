@@ -1,32 +1,26 @@
 """
 Type system for QMARITH: Quantum Modular Arithmetic DSL.
 
-This module implements the type system as defined in the language specification,
-including:
-- Int: integer type
-- Mod[N]: modular integer type with modulus N
-- Optional[τ]: optional type (τ?)
+Types in QMARITH:
+- Base types: [N] for modulus N ∈ ℕ
+- Maybe types: Maybe(T) for optional type T (T | None)
+
+For type [N], the bit-length is n = ⌈log₂(N)⌉.
+For type Maybe(T), the bit-length is T.n_bits + 1 (extra bit for None flag).
 """
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import (
-    Union,
-    Optional,
-)
-
-
-@dataclass(frozen=True)
-class Int:
-    """Integer type for quantum integers."""
-
-    def __repr__(self) -> str:
-        return "Int"
+from typing import Union
+import math
 
 
 @dataclass(frozen=True)
 class Mod:
-    """Modular integer type with a fixed modulus N."""
+    """Modular integer type with a fixed modulus N: [N]
+
+    The bit-length is n = ⌈log₂(N)⌉.
+    """
 
     N: int
 
@@ -37,47 +31,69 @@ class Mod:
         if self.N <= 0:
             raise ValueError(f"Modulus must be positive, got {self.N}")
 
+    @property
+    def n_bits(self) -> int:
+        """Return the number of bits needed to represent this type: ⌈log₂(N)⌉"""
+        if self.N == 1:
+            return 1
+        return math.ceil(math.log2(self.N))
+
+
+# TODO: not sure how to do this. Use Maybe monad for now.
+# @dataclass(frozen=True)
+# class Sum:
+#     inner_types: tuple[QType, ...]
+
+#     def __repr__(self) -> str:
+#         return f"Sum({self.inner_types})"
+
+#     def __post_init__(self):
+#         if not all(isinstance(ty, QType) for ty in self.inner_types):
+#             raise ValueError(f"Sum inner types must be QTypes, got {self.inner_types}")
+
+#     @property
+#     def n_bits(self) -> int:
+#         return max(ty.n_bits for ty in self.inner_types)
+
+#     @classmethod
+#     def of(cls, *types: QType) -> Sum:
+#         return cls(types)
+
 
 @dataclass(frozen=True)
-class Opt:
-    """Optional type: represents a value of type T or None.
+class Maybe:
+    """Maybe type: T | None, where T is a QType.
 
-    In the DSL syntax, this is written as τ? (e.g., [N]?).
+    For reversibility, Maybe(T) represents an optional value of type T.
+    The bit-length is T.n_bits + 1 (extra bit for None flag).
     """
 
-    inner: QType
+    inner_type: QType
 
     def __repr__(self) -> str:
-        return f"{self.inner}?"
+        return f"Maybe({self.inner_type})"
+
+    def __post_init__(self):
+        if not isinstance(self.inner_type, (Mod, Maybe)):
+            raise ValueError(
+                f"Maybe inner type must be a QType, got {type(self.inner_type)}"
+            )
+
+    @property
+    def n_bits(self) -> int:
+        """Return the number of bits needed: inner_type.n_bits + 1 (for None flag)"""
+        return self.inner_type.n_bits + 1
 
 
 # Union type for all possible quantum types
-QType = Union[Int, Mod, Opt]
+QType = Union[Mod, Maybe]
 
 
-def is_optional(ty: QType) -> bool:
-    """Check if a type is optional."""
-    return isinstance(ty, Opt)
-
-
-def unwrap_optional(ty: QType) -> QType:
-    """Unwrap an optional type, returning the inner type."""
-    if isinstance(ty, Opt):
-        return ty.inner
-    return ty
-
-
-def check_bin_mod(e1_type: QType, e2_type: QType) -> Optional[Mod]:
+def _check_binary_mod(e1_type: QType, e2_type: QType) -> Mod:
     """
-    Type check binary operations (+, -, *, **) on [N] types.
+    Internal helper: Check that both types are Mod with same modulus.
 
-    Rule T-BinMod:
-        Γ ⊢ e₁ : [N]
-        Γ ⊢ e₂ : [N]
-        ──────────────────
-        Γ ⊢ e₁ ⊕ e₂ : [N]
-
-    Returns the result type if valid, None otherwise.
+    Returns the result Mod type if valid, raises TypeError otherwise.
     """
     if isinstance(e1_type, Mod) and isinstance(e2_type, Mod):
         if e1_type.N == e2_type.N:
@@ -87,111 +103,35 @@ def check_bin_mod(e1_type: QType, e2_type: QType) -> Optional[Mod]:
                 f"Binary operation on Mod types requires same modulus: "
                 f"got Mod[{e1_type.N}] and Mod[{e2_type.N}]"
             )
-    return None
-
-
-def check_bin_int(e1_type: QType, e2_type: QType) -> Optional[Int]:
-    """
-    Type check binary operations (+, -, *, **, //) on Int types.
-
-    Rule T-Bin:
-        Γ ⊢ e₁ : Int
-        Γ ⊢ e₂ : Int
-        ──────────────────
-        Γ ⊢ e₁ ⊕ e₂ : Int
-
-    Returns the result type if valid, None otherwise.
-    """
-    if isinstance(e1_type, Int) and isinstance(e2_type, Int):
-        return Int()
-    return None
-
-
-def check_inv(e_type: QType) -> Optional[Opt]:
-    """
-    Type check modular inverse operation.
-
-    Rule T-Inv:
-        Γ ⊢ e : [N]
-        ──────────────────
-        Γ ⊢ inv e : [N]?
-
-    Returns the result type if valid, None otherwise.
-    """
-    if isinstance(e_type, Mod):
-        return Opt(e_type)
-    return None
-
-
-def check_ord(e1_type: QType, e2_type: QType) -> Optional[Opt]:
-    """
-    Type check order operation.
-
-    Rule T-Ord:
-        Γ ⊢ e₁ : [N]
-        Γ ⊢ e₂ : [N]
-        ──────────────────
-        Γ ⊢ ord e₁ e₂ : Int?
-
-    Returns the result type if valid, None otherwise.
-    """
-    if isinstance(e1_type, Mod) and isinstance(e2_type, Mod):
-        if e1_type.N == e2_type.N:
-            return Opt(Int())
-    return None
-
-
-def check_sqrt(e_type: QType) -> Optional[Opt]:
-    """
-    Type check square root operation.
-
-    Rule T-Sqrt:
-        Γ ⊢ e : [N]
-        ──────────────────
-        Γ ⊢ sqrt e : [N]?
-
-    Returns the result type if valid, None otherwise.
-    """
-    if isinstance(e_type, Mod):
-        return Opt(e_type)
-    return None
-
-
-def check_binary_op(op: str, e1_type: QType, e2_type: QType) -> Optional[QType]:
-    """
-    Type check a binary operation based on the operator.
-
-    Supports:
-    - +, -, *, **: work on both Int and [N]
-    - //: only works on Int
-
-    Returns the result type if valid, raises TypeError otherwise.
-    """
-    # Integer division only works on Int
-    if op == "//":
-        result = check_bin_int(e1_type, e2_type)
-        if result is not None:
-            return result
-        raise TypeError(
-            f"Integer division (//) requires Int types, got {e1_type} and {e2_type}"
-        )
-
-    # Other binary ops: try Mod first, then Int
-    result = check_bin_mod(e1_type, e2_type)
-    if result is not None:
-        return result
-
-    result = check_bin_int(e1_type, e2_type)
-    if result is not None:
-        return result
-
+    elif isinstance(e1_type, Maybe) and isinstance(e2_type, Maybe):
+        return Maybe(_check_binary_mod(e1_type.inner_type, e2_type.inner_type))
+    elif isinstance(e1_type, Maybe) and isinstance(e2_type, Mod):
+        return Maybe(_check_binary_mod(e1_type.inner_type, e2_type))
+    elif isinstance(e1_type, Mod) and isinstance(e2_type, Maybe):
+        return Maybe(_check_binary_mod(e1_type, e2_type.inner_type))
     raise TypeError(
-        f"Binary operation '{op}' requires compatible types "
-        f"(both Int or both Mod[N] with same N), "
+        f"Binary operation requires Mod types with same modulus, "
         f"got {e1_type} and {e2_type}"
     )
 
 
-def type_to_string(ty: QType) -> str:
-    """Convert a type to its string representation."""
-    return repr(ty)
+def check_add(e1_type: QType, e2_type: QType) -> QType:
+    return _check_binary_mod(e1_type, e2_type)
+
+
+def check_sub(e1_type: QType, e2_type: QType) -> QType:
+    return _check_binary_mod(e1_type, e2_type)
+
+
+def check_mul(e1_type: QType, e2_type: QType) -> QType:
+    return _check_binary_mod(e1_type, e2_type)
+
+
+def check_pow(e1_type: QType, e2_type: QType | int) -> QType:
+    if isinstance(e2_type, int):
+        return e1_type
+    return _check_binary_mod(e1_type, e2_type)
+
+
+def check_floordiv(e1_type: QType, e2_type: QType) -> QType:
+    return _check_binary_mod(e1_type, e2_type)
