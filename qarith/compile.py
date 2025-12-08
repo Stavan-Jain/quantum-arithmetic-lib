@@ -26,7 +26,8 @@ from .expr import (
     Expr,
 )
 from .circuit import Circuit, QubitAllocation
-from .qtype import Mod
+from .qtype import Mod, Maybe, QType
+from . import operators
 
 
 @dataclass
@@ -165,14 +166,13 @@ def _compile_const(expr: Const, ctx: CompilationContext) -> Circuit:
 
 
 def _compile_add(expr: Add, ctx: CompilationContext) -> Circuit:
-    """Compile an Add expression to a circuit.
+    """Compile an Add expression to a circuit using modular arithmetic.
 
     Strategy:
     1. Get or compile left and right operands (CSE handled automatically)
-    2. Determine qubit layout for the operation
-    3. Merge circuits with proper qubit remapping
-    4. Apply inplace_ripple_adder
-    5. Handle modular reduction if needed
+    2. Extract modulus from type
+    3. Use modular operators from operators.py
+    4. Handle qubit allocation and circuit merging
     """
     # Get qubits and circuits for operands (CSE: if they share subexpressions,
     # those subexpressions will have the same qubit assignments)
@@ -180,25 +180,47 @@ def _compile_add(expr: Add, ctx: CompilationContext) -> Circuit:
     right_qubits, right_circ = ctx.get_or_compile(expr.right)
 
     n_bits = expr.qtype().n_bits
+    ty = expr.qtype()
+
+    # Extract modulus (all arithmetic is modular in this language)
+    modulus, _ = _get_modulus_and_inner_n_bits(ty)
 
     # Determine total qubits needed
-    # Data: need space for both operands (they may overlap if sharing subexpressions)
     max_data_qubit = max(
         max(left_qubits) if left_qubits else 0,
         max(right_qubits) if right_qubits else 0,
         n_bits - 1,  # Result needs n_bits
     )
 
-    # Ancillas: max of both circuits' ancillas + adder ancillas + flag
+    # Ancillas: max of both circuits' ancillas
     max_ancillas = max(
         len(left_circ.allocation.ancilla_qubits),
         len(right_circ.allocation.ancilla_qubits),
     )
-    adder_carry_ancillas = n_bits + 1
-    flag_ancilla = 1
 
-    total_ancillas = max_ancillas + adder_carry_ancillas + flag_ancilla
-    total_qubits = max_data_qubit + 1 + total_ancillas
+    # Check if we need temporary space for overlapping operands
+    left_qubits_set = set(left_qubits)
+    right_qubits_set = set(right_qubits)
+    need_temp_space = bool(left_qubits_set & right_qubits_set) and (
+        left_qubits != right_qubits
+    )
+
+    # We need space for:
+    # - result_qubits: n_bits qubits
+    # - aux_qubits: n_bits + 2 qubits (for modular operations)
+    # - temp_qubits: n_bits qubits (if needed for overlapping operands)
+    # Total additional space needed: n_bits + (n_bits + 2) + (n_bits if need_temp_space else 0)
+
+    # Allocate result qubits starting after max_ancillas
+    result_start = max_data_qubit + 1 + max_ancillas
+    result_qubits = list(range(result_start, result_start + n_bits))
+    aux_start = result_start + n_bits
+    aux_qubits = list(range(aux_start, aux_start + n_bits + 2))
+
+    # Total qubits needed
+    temp_space = n_bits if need_temp_space else 0
+    total_qubits = max_data_qubit + 1 + max_ancillas + 2 * n_bits + 2 + temp_space
+    total_ancillas = max_ancillas + 2 * n_bits + 2 + temp_space
 
     # Create merged circuit
     merged_allocation = QubitAllocation(
@@ -217,30 +239,25 @@ def _compile_add(expr: Add, ctx: CompilationContext) -> Circuit:
     _compose_circuit(merged_circ, left_remapped)
 
     # Remap and compose right circuit
-    # For addition, we need right operand in a separate space initially
-    # But if left and right share subexpressions, they already use same qubits
-    # So we need to handle the case where they overlap
     right_ancilla_target = list(
         range(max_data_qubit + 1, max_data_qubit + 1 + max_ancillas)
     )
 
-    # Check if left and right share qubits (common subexpressions)
-    left_qubits_set = set(left_qubits)
-    right_qubits_set = set(right_qubits)
-
     if left_qubits_set & right_qubits_set:
-        # They share qubits - this means they have common subexpressions
-        # For addition, we need to copy right to a temporary location first
-        # For now, we'll use a simplified approach: assume they can be added in-place
-        # if they're the same, or use a temporary if different
+        # They share qubits - need temporary space
         if left_qubits == right_qubits:
-            # Same expression: x + x = 2x (can optimize later)
+            # Same expression: x + x = 2x
             temp_qubits = left_qubits
         else:
             # Different but overlapping: need temporary space
-            temp_start = max_data_qubit + 1 + max_ancillas
+            # Allocate temp space after aux_qubits
+            temp_start = aux_start + n_bits + 2
             temp_qubits = list(range(temp_start, temp_start + n_bits))
             # Copy right to temp
+            right_remapped = _remap_circuit(
+                right_circ, right_ancilla_target, right_qubits
+            )
+            _compose_circuit(merged_circ, right_remapped)
             _copy_qubits(merged_circ, right_qubits, temp_qubits)
             right_qubits = temp_qubits
     else:
@@ -248,64 +265,456 @@ def _compile_add(expr: Add, ctx: CompilationContext) -> Circuit:
         right_remapped = _remap_circuit(right_circ, right_ancilla_target, right_qubits)
         _compose_circuit(merged_circ, right_remapped)
 
-    # Apply inplace ripple adder
-    # Result will be in left_qubits (in-place addition)
-    carry_start = max_data_qubit + 1 + max_ancillas
-    carry_qubits = list(range(carry_start, carry_start + adder_carry_ancillas))
+    # Check if operands are constants
+    from .expr import Const
 
-    from .adders.inplace_adder import inplace_ripple_adder
+    left_is_const = isinstance(expr.left, Const)
+    right_is_const = isinstance(expr.right, Const)
 
-    inplace_ripple_adder(
-        merged_circ.qc,
-        left_qubits,  # First operand (will contain result)
-        right_qubits,  # Second operand
-        carry_qubits,  # Carry register
-    )
+    # Initialize aux_qubits to zero (required by modular_add functions)
+    # aux_qubits[0] is control, aux_qubits[1:n_bits+1] will contain result
+    # Note: In quantum circuits, qubits are initialized to |0⟩ by default,
+    # but we ensure they are explicitly zero by not applying any gates before use
 
-    # Apply modular reduction if needed
-    ty = expr.qtype()
-    if isinstance(ty, Mod):
-        modulus = ty.N
-        if modulus < (1 << n_bits):
-            flag_qubit = carry_start + adder_carry_ancillas
-            _compare_const(merged_circ, left_qubits, modulus, flag_qubit)
-            _sub_const_if_flag(
-                merged_circ, left_qubits, modulus, flag_qubit, carry_qubits[0]
-            )
+    if left_is_const and right_is_const:
+        # Both constants: initialize result with left, then add right
+        _init_constant(merged_circ, result_qubits, expr.left.value)
+        # Use quantum-classical to add right constant
+        operators.modular_add_quantum_classical(
+            merged_circ.qc, result_qubits, expr.right.value, modulus, aux_qubits
+        )
+        # Result is in aux_qubits[1:n_bits+1]
+        _copy_qubits(merged_circ, aux_qubits[1 : n_bits + 1], result_qubits)
+    elif left_is_const:
+        # Left is constant: copy right to result, then add left constant
+        _copy_qubits(merged_circ, right_qubits, result_qubits)
+        operators.modular_add_quantum_classical(
+            merged_circ.qc, result_qubits, expr.left.value, modulus, aux_qubits
+        )
+        # Result is in aux_qubits[1:n_bits+1]
+        _copy_qubits(merged_circ, aux_qubits[1 : n_bits + 1], result_qubits)
+    elif right_is_const:
+        # Right is constant: copy left to result, then add right constant
+        _copy_qubits(merged_circ, left_qubits, result_qubits)
+        operators.modular_add_quantum_classical(
+            merged_circ.qc, result_qubits, expr.right.value, modulus, aux_qubits
+        )
+        # Result is in aux_qubits[1:n_bits+1]
+        _copy_qubits(merged_circ, aux_qubits[1 : n_bits + 1], result_qubits)
+    else:
+        # Both quantum: copy left to result, then add right quantum
+        _copy_qubits(merged_circ, left_qubits, result_qubits)
+        operators.modular_add_quantum_quantum(
+            merged_circ.qc, result_qubits, right_qubits, modulus, aux_qubits
+        )
+        # Result is in aux_qubits[1:n_bits+1]
+        _copy_qubits(merged_circ, aux_qubits[1 : n_bits + 1], result_qubits)
 
-    # Update context allocation
+    # Update context to use result_qubits as the output
+    ctx.expr_to_qubits[expr] = result_qubits
     ctx.allocation = merged_allocation
-
     return merged_circ
 
 
 def _compile_sub(expr: Sub, ctx: CompilationContext) -> Circuit:
-    """Compile a Sub expression to a circuit."""
-    # Similar to Add, but using subtraction logic
+    """Compile a Sub expression to a circuit using modular arithmetic.
+
+    Strategy: Use modular subtraction operators from operators.py
+    """
+    # Get qubits and circuits for operands
     left_qubits, left_circ = ctx.get_or_compile(expr.left)
     right_qubits, right_circ = ctx.get_or_compile(expr.right)
 
     n_bits = expr.qtype().n_bits
-    # TODO: Implement subtraction similar to addition
-    # For now, placeholder
-    allocation = QubitAllocation(data_qubits=n_bits, ancilla_qubits=[])
-    return Circuit(n_qubits=n_bits, allocation=allocation)
+    ty = expr.qtype()
+
+    # Extract modulus
+    modulus, _ = _get_modulus_and_inner_n_bits(ty)
+
+    # Determine total qubits needed
+    max_data_qubit = max(
+        max(left_qubits) if left_qubits else 0,
+        max(right_qubits) if right_qubits else 0,
+        n_bits - 1,  # Result needs n_bits
+    )
+
+    # Ancillas: max of both circuits' ancillas
+    max_ancillas = max(
+        len(left_circ.allocation.ancilla_qubits),
+        len(right_circ.allocation.ancilla_qubits),
+    )
+
+    # Check if we need temporary space for overlapping operands
+    left_qubits_set = set(left_qubits)
+    right_qubits_set = set(right_qubits)
+    need_temp_space = bool(left_qubits_set & right_qubits_set) and (
+        left_qubits != right_qubits
+    )
+
+    # We need space for:
+    # - result_qubits: n_bits qubits
+    # - aux_qubits: n_bits + 2 qubits (for modular operations)
+    # - temp_qubits: n_bits qubits (if needed for overlapping operands)
+    # Total additional space needed: n_bits + (n_bits + 2) + (n_bits if need_temp_space else 0)
+
+    # Allocate result qubits starting after max_ancillas
+    result_start = max_data_qubit + 1 + max_ancillas
+    result_qubits = list(range(result_start, result_start + n_bits))
+    aux_start = result_start + n_bits
+    aux_qubits = list(range(aux_start, aux_start + n_bits + 2))
+
+    # Total qubits needed
+    temp_space = n_bits if need_temp_space else 0
+    total_qubits = max_data_qubit + 1 + max_ancillas + 2 * n_bits + 2 + temp_space
+    total_ancillas = max_ancillas + 2 * n_bits + 2 + temp_space
+
+    # Create merged circuit
+    merged_allocation = QubitAllocation(
+        data_qubits=max_data_qubit + 1,
+        ancilla_qubits=list(
+            range(max_data_qubit + 1, max_data_qubit + 1 + total_ancillas)
+        ),
+    )
+    merged_circ = Circuit(n_qubits=total_qubits, allocation=merged_allocation)
+
+    # Remap and compose left circuit
+    left_ancilla_target = list(
+        range(max_data_qubit + 1, max_data_qubit + 1 + max_ancillas)
+    )
+    left_remapped = _remap_circuit(left_circ, left_ancilla_target, left_qubits)
+    _compose_circuit(merged_circ, left_remapped)
+
+    # Remap and compose right circuit
+    right_ancilla_target = list(
+        range(max_data_qubit + 1, max_data_qubit + 1 + max_ancillas)
+    )
+
+    if left_qubits_set & right_qubits_set:
+        # They share qubits - need temporary space
+        if left_qubits == right_qubits:
+            # Same expression: x - x = 0
+            temp_qubits = left_qubits
+        else:
+            # Different but overlapping: need temporary space
+            temp_start = aux_start + n_bits + 2
+            temp_qubits = list(range(temp_start, temp_start + n_bits))
+            # Copy right to temp
+            right_remapped = _remap_circuit(
+                right_circ, right_ancilla_target, right_qubits
+            )
+            _compose_circuit(merged_circ, right_remapped)
+            _copy_qubits(merged_circ, right_qubits, temp_qubits)
+            right_qubits = temp_qubits
+    else:
+        # No overlap: remap right to its assigned qubits
+        right_remapped = _remap_circuit(right_circ, right_ancilla_target, right_qubits)
+        _compose_circuit(merged_circ, right_remapped)
+
+    # Check if operands are constants
+    from .expr import Const
+
+    left_is_const = isinstance(expr.left, Const)
+    right_is_const = isinstance(expr.right, Const)
+
+    # Copy left operand to result
+    _copy_qubits(merged_circ, left_qubits, result_qubits)
+
+    if left_is_const and right_is_const:
+        # Both constants: subtract right from left
+        operators.modular_subtract_quantum_classical(
+            merged_circ.qc, result_qubits, expr.right.value, modulus, aux_qubits
+        )
+        # Result is in aux_qubits[1:n_bits+1]
+        _copy_qubits(merged_circ, aux_qubits[1 : n_bits + 1], result_qubits)
+    elif left_is_const:
+        # Left is constant: compute left - right
+        # First copy left to result, then subtract right
+        _init_constant(merged_circ, result_qubits, expr.left.value)
+        operators.modular_subtract_quantum_quantum(
+            merged_circ.qc, result_qubits, right_qubits, modulus, aux_qubits
+        )
+        # Result is in aux_qubits[1:n_bits+1]
+        _copy_qubits(merged_circ, aux_qubits[1 : n_bits + 1], result_qubits)
+    elif right_is_const:
+        # Right is constant: subtract right from left
+        operators.modular_subtract_quantum_classical(
+            merged_circ.qc, result_qubits, expr.right.value, modulus, aux_qubits
+        )
+        # Result is in aux_qubits[1:n_bits+1]
+        _copy_qubits(merged_circ, aux_qubits[1 : n_bits + 1], result_qubits)
+    else:
+        # Both quantum: use quantum-quantum subtraction
+        operators.modular_subtract_quantum_quantum(
+            merged_circ.qc, result_qubits, right_qubits, modulus, aux_qubits
+        )
+        # Result is in aux_qubits[1:n_bits+1]
+        _copy_qubits(merged_circ, aux_qubits[1 : n_bits + 1], result_qubits)
+
+    # Update context to use result_qubits as the output
+    ctx.expr_to_qubits[expr] = result_qubits
+    ctx.allocation = merged_allocation
+    return merged_circ
 
 
 def _compile_mul(expr: Mul, ctx: CompilationContext) -> Circuit:
-    """Compile a Mul expression to a circuit."""
-    # TODO: Implement multiplication
+    """Compile a Mul expression to a circuit using modular arithmetic."""
+    # Get qubits and circuits for operands
+    left_qubits, left_circ = ctx.get_or_compile(expr.left)
+    right_qubits, right_circ = ctx.get_or_compile(expr.right)
+
     n_bits = expr.qtype().n_bits
-    allocation = QubitAllocation(data_qubits=n_bits, ancilla_qubits=[])
-    return Circuit(n_qubits=n_bits, allocation=allocation)
+    ty = expr.qtype()
+
+    # Extract modulus and inner n_bits
+    modulus, inner_n_bits = _get_modulus_and_inner_n_bits(ty)
+
+    # Extract inner qubits from Maybe types (remove flag bits)
+    left_qubits = _extract_inner_qubits(left_qubits, expr.left.qtype())
+    right_qubits = _extract_inner_qubits(right_qubits, expr.right.qtype())
+
+    # Verify that inner qubits have the same length
+    if len(left_qubits) != len(right_qubits):
+        raise ValueError(
+            f"Operands must have same inner Mod type size for multiplication: "
+            f"left has {len(left_qubits)} qubits, right has {len(right_qubits)} qubits, "
+            f"expected {inner_n_bits} qubits"
+        )
+
+    # Determine total qubits needed
+    max_data_qubit = max(
+        max(left_qubits) if left_qubits else 0,
+        max(right_qubits) if right_qubits else 0,
+        n_bits - 1,  # Result needs n_bits
+    )
+
+    # Ancillas: max of both circuits' ancillas
+    max_ancillas = max(
+        len(left_circ.allocation.ancilla_qubits),
+        len(right_circ.allocation.ancilla_qubits),
+    )
+
+    # Check if we need temporary space for overlapping operands
+    left_qubits_set = set(left_qubits)
+    right_qubits_set = set(right_qubits)
+    need_temp_space = bool(left_qubits_set & right_qubits_set) and (
+        left_qubits != right_qubits
+    )
+
+    # Allocate aux qubits for modular multiplication
+    # Use inner_n_bits for the actual Mod type (not n_bits which may include Maybe flag)
+    aux_start = max_data_qubit + 1 + max_ancillas
+    aux_qubits = list(range(aux_start, aux_start + inner_n_bits + 2))
+    # Result will be in aux_qubits[1:inner_n_bits+1] for the inner Mod type
+    # But we need to map it back to result_qubits which may include Maybe flag
+    inner_result_qubits = aux_qubits[1 : inner_n_bits + 1]
+
+    # Allocate result qubits (may include Maybe flag bits)
+    result_start = aux_start + inner_n_bits + 2
+    result_qubits = list(range(result_start, result_start + n_bits))
+
+    # Total qubits needed
+    temp_space = inner_n_bits if need_temp_space else 0
+    total_qubits = (
+        max_data_qubit + 1 + max_ancillas + inner_n_bits + 2 + n_bits + temp_space
+    )
+    total_ancillas = max_ancillas + inner_n_bits + 2 + n_bits + temp_space
+
+    # Create merged circuit
+    merged_allocation = QubitAllocation(
+        data_qubits=max_data_qubit + 1,
+        ancilla_qubits=list(
+            range(max_data_qubit + 1, max_data_qubit + 1 + total_ancillas)
+        ),
+    )
+    merged_circ = Circuit(n_qubits=total_qubits, allocation=merged_allocation)
+
+    # Remap and compose left circuit
+    left_ancilla_target = list(
+        range(max_data_qubit + 1, max_data_qubit + 1 + max_ancillas)
+    )
+    left_remapped = _remap_circuit(left_circ, left_ancilla_target, left_qubits)
+    _compose_circuit(merged_circ, left_remapped)
+
+    # Remap and compose right circuit
+    right_ancilla_target = list(
+        range(max_data_qubit + 1, max_data_qubit + 1 + max_ancillas)
+    )
+
+    if left_qubits_set & right_qubits_set:
+        if left_qubits == right_qubits:
+            temp_qubits = left_qubits
+        else:
+            temp_start = result_start + n_bits
+            temp_qubits = list(range(temp_start, temp_start + inner_n_bits))
+            right_remapped = _remap_circuit(
+                right_circ, right_ancilla_target, right_qubits
+            )
+            _compose_circuit(merged_circ, right_remapped)
+            _copy_qubits(merged_circ, right_qubits, temp_qubits)
+            right_qubits = temp_qubits
+    else:
+        right_remapped = _remap_circuit(right_circ, right_ancilla_target, right_qubits)
+        _compose_circuit(merged_circ, right_remapped)
+
+    # Check if operands are constants
+    from .expr import Const
+
+    left_is_const = isinstance(expr.left, Const)
+    right_is_const = isinstance(expr.right, Const)
+
+    if left_is_const and right_is_const:
+        # Both constants: result is (left * right) mod N
+        result_value = (expr.left.value * expr.right.value) % modulus
+        _init_constant(merged_circ, result_qubits, result_value)
+    elif left_is_const:
+        # Left is constant: compute result = left_const * right
+        # modular_multiply_quantum_classical: |a⟩ |b⟩ → |a⟩ |b + k*a mod N⟩
+        # We want: result = k * right, so initialize aux_qubits[1:n_bits+1] to 0
+        # Then use right_qubits as control, k=left_const
+        # Result will be in aux_qubits[1:n_bits+1]
+        operators.modular_multiply_quantum_classical(
+            merged_circ.qc, right_qubits, expr.left.value, modulus, aux_qubits
+        )
+        # Copy result back to result_qubits (from inner_result_qubits)
+        _copy_qubits(merged_circ, inner_result_qubits, result_qubits[:inner_n_bits])
+    elif right_is_const:
+        # Right is constant: compute result = left * right_const
+        # Use left_qubits as control, k=right_const
+        operators.modular_multiply_quantum_classical(
+            merged_circ.qc, left_qubits, expr.right.value, modulus, aux_qubits
+        )
+        # Copy result back to result_qubits (from inner_result_qubits)
+        _copy_qubits(merged_circ, inner_result_qubits, result_qubits[:inner_n_bits])
+    else:
+        # Both quantum: use quantum-quantum multiplication
+        # modular_multiply_quantum_quantum: |a⟩ |b⟩ |0⟩ → |a⟩ |b⟩ |(a * b) mod N⟩
+        # We want: result = left * right
+        # So we use left_qubits as a, right_qubits as b, aux_qubits for result
+        # Initialize aux_qubits[1:n_bits+1] to 0 (already done)
+        operators.modular_multiply_quantum_quantum(
+            merged_circ.qc, left_qubits, right_qubits, modulus, aux_qubits
+        )
+        # Result is in inner_result_qubits
+        # Copy to result_qubits (only the inner Mod part, Maybe flag bits remain 0)
+        _copy_qubits(merged_circ, inner_result_qubits, result_qubits[:inner_n_bits])
+
+    # Update context to use result_qubits as the output
+    ctx.expr_to_qubits[expr] = result_qubits
+    ctx.allocation = merged_allocation
+    return merged_circ
 
 
 def _compile_pow(expr: Pow, ctx: CompilationContext) -> Circuit:
-    """Compile a Pow expression to a circuit."""
-    # TODO: Implement exponentiation
+    """Compile a Pow expression to a circuit using modular arithmetic."""
+    # Get qubits and circuits for operands
+    base_qubits, base_circ = ctx.get_or_compile(expr.base)
+
+    # Handle exponent: it can be int or Expr
+    if isinstance(expr.exponent, int):
+        # Convert int exponent to Const expression
+        from .expr import Const
+
+        modulus, _ = _get_modulus_and_inner_n_bits(expr.base.qtype())
+        exp_expr = Const(expr.exponent, modulus=modulus)
+        exp_qubits, exp_circ = ctx.get_or_compile(exp_expr)
+    else:
+        exp_qubits, exp_circ = ctx.get_or_compile(expr.exponent)
+
     n_bits = expr.qtype().n_bits
-    allocation = QubitAllocation(data_qubits=n_bits, ancilla_qubits=[])
-    return Circuit(n_qubits=n_bits, allocation=allocation)
+    ty = expr.qtype()
+
+    # Extract modulus
+    modulus, _ = _get_modulus_and_inner_n_bits(ty)
+
+    # Determine total qubits needed
+    max_data_qubit = max(
+        max(base_qubits) if base_qubits else 0,
+        max(exp_qubits) if exp_qubits else 0,
+        n_bits - 1,  # Result needs n_bits
+    )
+
+    # Ancillas: max of both circuits' ancillas + modular exponentiation ancillas
+    max_ancillas = max(
+        len(base_circ.allocation.ancilla_qubits),
+        len(exp_circ.allocation.ancilla_qubits),
+    )
+    modular_ancillas = n_bits + 2  # For modular operations
+
+    total_ancillas = max_ancillas + modular_ancillas
+    total_qubits = max_data_qubit + 1 + total_ancillas
+
+    # Create merged circuit
+    merged_allocation = QubitAllocation(
+        data_qubits=max_data_qubit + 1,
+        ancilla_qubits=list(
+            range(max_data_qubit + 1, max_data_qubit + 1 + total_ancillas)
+        ),
+    )
+    merged_circ = Circuit(n_qubits=total_qubits, allocation=merged_allocation)
+
+    # Remap and compose base circuit
+    base_ancilla_target = list(
+        range(max_data_qubit + 1, max_data_qubit + 1 + max_ancillas)
+    )
+    base_remapped = _remap_circuit(base_circ, base_ancilla_target, base_qubits)
+    _compose_circuit(merged_circ, base_remapped)
+
+    # Remap and compose exponent circuit
+    exp_ancilla_target = list(
+        range(max_data_qubit + 1, max_data_qubit + 1 + max_ancillas)
+    )
+    exp_remapped = _remap_circuit(exp_circ, exp_ancilla_target, exp_qubits)
+    _compose_circuit(merged_circ, exp_remapped)
+
+    # Allocate aux qubits for modular exponentiation (n + 2 qubits needed)
+    aux_start = max_data_qubit + 1 + max_ancillas
+    aux_qubits = list(range(aux_start, aux_start + n_bits + 2))
+    # Result will be in aux_qubits[1:n_bits+1] (initialized to |1⟩)
+    result_qubits = aux_qubits[1 : n_bits + 1]
+
+    # Initialize result to |1⟩ (required for exponentiation)
+    if n_bits > 0:
+        merged_circ.qc.x(result_qubits[0])  # Set LSB to 1
+
+    # Check if operands are constants
+    from .expr import Const
+
+    base_is_const = isinstance(expr.base, Const)
+    exp_is_const = isinstance(expr.exponent, (int, Const))
+
+    if base_is_const and exp_is_const:
+        # Both constants: result is (base^exp) mod N
+        exp_value = (
+            expr.exponent if isinstance(expr.exponent, int) else expr.exponent.value
+        )
+        result_value = pow(expr.base.value, exp_value, modulus)
+        # Reset result qubits
+        if n_bits > 0:
+            merged_circ.qc.x(result_qubits[0])  # Reset LSB
+        _init_constant(merged_circ, result_qubits, result_value)
+    elif base_is_const:
+        # Base is constant: use quantum-classical exponentiation
+        # This requires controlled IMQCM_cir which is not yet fully implemented
+        raise NotImplementedError(
+            "Modular exponentiation with quantum exponent is not yet implemented"
+        )
+    elif exp_is_const:
+        # Exponent is constant: use quantum-classical exponentiation
+        # This requires controlled IMQCM_cir which is not yet fully implemented
+        raise NotImplementedError(
+            "Modular exponentiation with quantum base is not yet implemented"
+        )
+    else:
+        # Both quantum: use quantum-quantum exponentiation
+        # This is not yet implemented in operators.py
+        raise NotImplementedError(
+            "Quantum-quantum modular exponentiation is not yet implemented"
+        )
+
+    # Update context to use result_qubits as the output
+    ctx.expr_to_qubits[expr] = result_qubits
+    ctx.allocation = merged_allocation
+    return merged_circ
 
 
 def _compile_floordiv(expr: Div, ctx: CompilationContext) -> Circuit:
@@ -359,6 +768,72 @@ def _compile_join(expr: Join, ctx: CompilationContext) -> Circuit:
 # Helper functions
 
 
+def _unwrap_maybe_type(ty: QType) -> tuple[Mod, int]:
+    """
+    Unwrap Maybe types to get the inner Mod type and the number of Maybe wrappers.
+
+    Args:
+        ty: A QType (Mod or Maybe)
+
+    Returns:
+        Tuple of (inner Mod type, number of Maybe wrappers)
+
+    Examples:
+        _unwrap_maybe_type(Mod(11)) -> (Mod(11), 0)
+        _unwrap_maybe_type(Maybe(Mod(11))) -> (Mod(11), 1)
+        _unwrap_maybe_type(Maybe(Maybe(Mod(11)))) -> (Mod(11), 2)
+    """
+    if isinstance(ty, Mod):
+        return ty, 0
+    elif isinstance(ty, Maybe):
+        inner_mod, depth = _unwrap_maybe_type(ty.inner_type)
+        return inner_mod, depth + 1
+    else:
+        raise ValueError(f"Cannot unwrap type {ty}")
+
+
+def _extract_inner_qubits(qubits: List[int], expr_type: QType) -> List[int]:
+    """
+    Extract the inner Mod type qubits from a Maybe type qubit list.
+
+    For Maybe types, the last qubit is the flag bit. This function removes
+    all flag bits to get the inner Mod type qubits.
+
+    Args:
+        qubits: List of qubit indices for the expression
+        expr_type: The type of the expression
+
+    Returns:
+        List of qubit indices for the inner Mod type (without flag bits)
+
+    Examples:
+        _extract_inner_qubits([0, 1, 2, 3], Mod(11)) -> [0, 1, 2, 3]
+        _extract_inner_qubits([0, 1, 2, 3, 4], Maybe(Mod(11))) -> [0, 1, 2, 3]
+    """
+    if isinstance(expr_type, Mod):
+        return qubits
+    elif isinstance(expr_type, Maybe):
+        # Remove the last qubit (flag bit) and recurse
+        inner_qubits = qubits[:-1]
+        return _extract_inner_qubits(inner_qubits, expr_type.inner_type)
+    else:
+        raise ValueError(f"Cannot extract qubits from type {expr_type}")
+
+
+def _get_modulus_and_inner_n_bits(ty: QType) -> tuple[int, int]:
+    """
+    Extract modulus and inner n_bits from a QType (handling Maybe wrappers).
+
+    Args:
+        ty: A QType (Mod or Maybe)
+
+    Returns:
+        Tuple of (modulus, inner_n_bits)
+    """
+    inner_mod, _ = _unwrap_maybe_type(ty)
+    return inner_mod.N, inner_mod.n_bits
+
+
 def _remap_circuit(
     circ: Circuit, ancilla_target: List[int], data_qubits: List[int]
 ) -> Circuit:
@@ -390,7 +865,10 @@ def _remap_circuit(
 
     # Copy and remap all gates
     for instruction in circ.qc.data:
-        remapped_qubits = [qubit_map.get(q.index, q.index) for q in instruction.qubits]
+        remapped_qubits = [
+            qubit_map.get(circ.qc.find_bit(q).index, circ.qc.find_bit(q).index)
+            for q in instruction.qubits
+        ]
         new_circ.qc.append(instruction.operation, remapped_qubits, instruction.clbits)
 
     return new_circ
@@ -406,7 +884,15 @@ def _compose_circuit(target: Circuit, source: Circuit):
     # Ensure target has enough qubits
     needed_qubits = max(
         target.n_qubits,
-        max((q.index for inst in source.qc.data for q in inst.qubits), default=0) + 1,
+        max(
+            (
+                source.qc.find_bit(q).index
+                for inst in source.qc.data
+                for q in inst.qubits
+            ),
+            default=0,
+        )
+        + 1,
     )
     if needed_qubits > target.n_qubits:
         from qiskit import QuantumCircuit
@@ -417,9 +903,13 @@ def _compose_circuit(target: Circuit, source: Circuit):
         target.qc = new_qc
         target.n_qubits = needed_qubits
 
-    # Compose gates
+    # Compose gates - map source qubits to target qubits
     for instruction in source.qc.data:
-        target.qc.append(instruction.operation, instruction.qubits, instruction.clbits)
+        # Map source qubits to target qubits by index
+        mapped_qubits = [
+            target.qc.qubits[source.qc.find_bit(q).index] for q in instruction.qubits
+        ]
+        target.qc.append(instruction.operation, mapped_qubits, instruction.clbits)
 
 
 def _copy_qubits(circ: Circuit, src_qubits: List[int], dst_qubits: List[int]):
