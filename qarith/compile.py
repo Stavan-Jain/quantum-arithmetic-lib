@@ -500,24 +500,24 @@ def _compile_mul(expr: Mul, ctx: CompilationContext) -> Circuit:
         left_qubits != right_qubits
     )
 
-    # Allocate aux qubits for modular multiplication
+    # Allocate result qubits first (consistent with add/sub pattern)
+    result_start = max_data_qubit + 1 + max_ancillas
+    result_qubits = list(range(result_start, result_start + n_bits))
+
+    # Allocate aux qubits after result qubits (consistent with add/sub pattern)
     # Use inner_n_bits for the actual Mod type (not n_bits which may include Maybe flag)
-    aux_start = max_data_qubit + 1 + max_ancillas
+    aux_start = result_start + n_bits
     aux_qubits = list(range(aux_start, aux_start + inner_n_bits + 2))
     # Result will be in aux_qubits[1:inner_n_bits+1] for the inner Mod type
     # But we need to map it back to result_qubits which may include Maybe flag
     inner_result_qubits = aux_qubits[1 : inner_n_bits + 1]
 
-    # Allocate result qubits (may include Maybe flag bits)
-    result_start = aux_start + inner_n_bits + 2
-    result_qubits = list(range(result_start, result_start + n_bits))
-
     # Total qubits needed
     temp_space = inner_n_bits if need_temp_space else 0
     total_qubits = (
-        max_data_qubit + 1 + max_ancillas + inner_n_bits + 2 + n_bits + temp_space
+        max_data_qubit + 1 + max_ancillas + n_bits + inner_n_bits + 2 + temp_space
     )
-    total_ancillas = max_ancillas + inner_n_bits + 2 + n_bits + temp_space
+    total_ancillas = max_ancillas + n_bits + inner_n_bits + 2 + temp_space
 
     # Create merged circuit
     merged_allocation = QubitAllocation(
@@ -544,7 +544,7 @@ def _compile_mul(expr: Mul, ctx: CompilationContext) -> Circuit:
         if left_qubits == right_qubits:
             temp_qubits = left_qubits
         else:
-            temp_start = result_start + n_bits
+            temp_start = aux_start + inner_n_bits + 2
             temp_qubits = list(range(temp_start, temp_start + inner_n_bits))
             right_remapped = _remap_circuit(
                 right_circ, right_ancilla_target, right_qubits
@@ -563,39 +563,26 @@ def _compile_mul(expr: Mul, ctx: CompilationContext) -> Circuit:
     right_is_const = isinstance(expr.right, Const)
 
     if left_is_const and right_is_const:
-        # Both constants: result is (left * right) mod N
         result_value = (expr.left.value * expr.right.value) % modulus
         _init_constant(merged_circ, result_qubits, result_value)
     elif left_is_const:
-        # Left is constant: compute result = left_const * right
-        # modular_multiply_quantum_classical: |a⟩ |b⟩ → |a⟩ |b + k*a mod N⟩
-        # We want: result = k * right, so initialize aux_qubits[1:n_bits+1] to 0
-        # Then use right_qubits as control, k=left_const
-        # Result will be in aux_qubits[1:n_bits+1]
+        _init_constant(merged_circ, inner_result_qubits, 0)
         operators.modular_multiply_quantum_classical(
             merged_circ.qc, right_qubits, expr.left.value, modulus, aux_qubits
         )
-        # Copy result back to result_qubits (from inner_result_qubits)
         _copy_qubits(merged_circ, inner_result_qubits, result_qubits[:inner_n_bits])
     elif right_is_const:
-        # Right is constant: compute result = left * right_const
-        # Use left_qubits as control, k=right_const
+        _init_constant(merged_circ, inner_result_qubits, 0)
         operators.modular_multiply_quantum_classical(
             merged_circ.qc, left_qubits, expr.right.value, modulus, aux_qubits
         )
         # Copy result back to result_qubits (from inner_result_qubits)
         _copy_qubits(merged_circ, inner_result_qubits, result_qubits[:inner_n_bits])
     else:
-        # Both quantum: use quantum-quantum multiplication
-        # modular_multiply_quantum_quantum: |a⟩ |b⟩ |0⟩ → |a⟩ |b⟩ |(a * b) mod N⟩
-        # We want: result = left * right
-        # So we use left_qubits as a, right_qubits as b, aux_qubits for result
-        # Initialize aux_qubits[1:n_bits+1] to 0 (already done)
+        _init_constant(merged_circ, inner_result_qubits, 0)
         operators.modular_multiply_quantum_quantum(
             merged_circ.qc, left_qubits, right_qubits, modulus, aux_qubits
         )
-        # Result is in inner_result_qubits
-        # Copy to result_qubits (only the inner Mod part, Maybe flag bits remain 0)
         _copy_qubits(merged_circ, inner_result_qubits, result_qubits[:inner_n_bits])
 
     # Update context to use result_qubits as the output

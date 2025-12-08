@@ -77,8 +77,14 @@ class Expr(ABC):
         """scalar * A = Mul(Const(scalar), A)"""
         return Mul(other, self)
 
-    def __rpow__(self, other: Expr) -> Pow:
+    def __rpow__(self, other) -> Pow:
         """scalar ** A = Pow(Const(scalar), A)"""
+        # Convert int/float to Const if needed
+        if isinstance(other, (int, float)):
+            from .qtype import Mod
+
+            modulus = self.qtype().N if isinstance(self.qtype(), Mod) else None
+            return Pow(Const(other, modulus=modulus), self)
         return Pow(other, self)
 
     def __rfloordiv__(self, other: Expr) -> Div:
@@ -315,6 +321,23 @@ class Pow(Expr):
         """Check type compatibility and compute result type at initialization."""
         from .qtype import check_pow
 
+        # Handle base: convert int/float to Const if needed
+        if isinstance(self.base, (int, float)):
+            from .qtype import Mod
+
+            # Get modulus from exponent if it's an Expr
+            if isinstance(self.exponent, Expr):
+                exp_type = self.exponent.qtype()
+                modulus = exp_type.N if isinstance(exp_type, Mod) else None
+            elif isinstance(self.exponent, int):
+                # For int exponent, we need modulus from context
+                # This is a limitation - we'll handle it in compile
+                modulus = None
+            else:
+                modulus = None
+            object.__setattr__(self, "base", Const(self.base, modulus=modulus))
+
+        # Check types and compute result type
         if isinstance(self.exponent, int):
             result_type = check_pow(self.base.qtype(), self.exponent)
         else:

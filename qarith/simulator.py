@@ -13,6 +13,11 @@ from .expr import Expr, Basic
 from .compile import CompilationContext, _compile_with_context
 from .qtype import QType, Mod, Maybe
 
+# Constants
+_POSTSELECTION_NORM_THRESHOLD = (
+    1e-15  # Threshold for detecting zero state after postselection
+)
+
 
 def run(
     expr: Expr,
@@ -54,7 +59,7 @@ def run(
     initial_state = _initialize_inputs(expr, inputs, ctx, data_qubits, ancilla_qubits)
 
     # Run the circuit
-    final_state_full = _execute_circuit(circuit.qc, initial_state, total_qubits)
+    final_state_full = _execute_circuit(circuit.qc, initial_state)
 
     # Extract result qubits before postselection (they might be outside data_qubits range)
     result_qubits = ctx.expr_to_qubits.get(expr)
@@ -235,16 +240,13 @@ def _traverse_and_initialize(expr: Expr, init_func, ctx: CompilationContext):
     # Const expressions don't need initialization (they're compiled into gates)
 
 
-def _execute_circuit(
-    qc: QuantumCircuit, initial_state: np.ndarray, total_qubits: int
-) -> np.ndarray:
+def _execute_circuit(qc: QuantumCircuit, initial_state: np.ndarray) -> np.ndarray:
     """
     Execute a quantum circuit on an initial state.
 
     Args:
         qc: Qiskit QuantumCircuit
         initial_state: Initial state vector
-        total_qubits: Total number of qubits
 
     Returns:
         Final state vector after applying the circuit
@@ -328,7 +330,7 @@ def _postselect_ancillas(
 
     # Normalize
     norm = np.linalg.norm(postselected)
-    if norm < 1e-15:
+    if norm < _POSTSELECTION_NORM_THRESHOLD:
         raise ValueError(
             "Postselection resulted in zero state. "
             "This may indicate an error in the circuit or invalid inputs."
@@ -425,9 +427,7 @@ def _extract_result(
 
     if isinstance(qtype, Mod):
         # Extract value from result qubits
-        value = _extract_value_from_qubits(
-            final_state, result_qubits, qtype.n_bits, total_qubits, is_postselected
-        )
+        value = _extract_value_from_qubits(final_state, result_qubits)
         return value % qtype.N
 
     elif isinstance(qtype, Maybe):
@@ -437,13 +437,7 @@ def _extract_result(
         flag_qubit = result_qubits[-1]
 
         if isinstance(inner_type, Mod):
-            inner_value = _extract_value_from_qubits(
-                final_state,
-                inner_qubits,
-                inner_type.n_bits,
-                total_qubits,
-                is_postselected,
-            )
+            inner_value = _extract_value_from_qubits(final_state, inner_qubits)
             inner_value = inner_value % inner_type.N
 
             # Extract flag bit
@@ -466,14 +460,16 @@ def _extract_result(
 def _extract_value_from_qubits(
     state: np.ndarray,
     qubits: list[int],
-    n_bits: int,
-    total_qubits: int,
-    is_postselected: bool,
 ) -> int:
     """
     Extract integer value from qubits in the state vector.
 
-    For postselected states, we assume qubits are in positions 0 to state_dim-1.
+    Args:
+        state: State vector to extract from
+        qubits: List of qubit indices to extract
+
+    Returns:
+        Extracted integer value
     """
     # Find the most probable basis state
     state_dim = len(state)
