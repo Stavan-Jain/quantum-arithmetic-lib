@@ -31,6 +31,9 @@ class AdderSimulationResult:
     carry_out: int | None
     raw_bitstring: str
     counts: Dict[str, int]
+    cx_count: int
+    ccx_count: int
+    op_counts: Dict[str, int]
 
 
 AdderFactory = type[Adder]
@@ -91,6 +94,11 @@ def simulate_adder_sum(
     measure_fn, parse_fn = _build_hooks(adder_key)
     measure_fn(prepared, n_bits)
 
+    cost_circ = prepared.decompose(reps=10)
+    op_summary = cost_circ.count_ops()
+    cx_count = int(op_summary.get("cx", 0))
+    ccx_count = int(op_summary.get("ccx", 0))
+
     compiled = transpile(prepared, _AER_SIMULATOR)
     job = _AER_SIMULATOR.run(compiled, shots=shots)
     result = job.result()
@@ -111,6 +119,9 @@ def simulate_adder_sum(
         carry_out=carry,
         raw_bitstring=raw_bits,
         counts=counts,
+        cx_count=cx_count,
+        ccx_count=ccx_count,
+        op_counts=dict(op_summary),
     )
 
 
