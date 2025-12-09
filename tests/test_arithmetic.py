@@ -11,20 +11,18 @@ from pathlib import Path
 # Add parent directory to path to allow imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from qarith.expr import Basic
+from qarith.expr import Var
 from qarith.qtype import Mod
 from qarith import run
 
 
 def test_addition():
     """Test modular addition."""
-    print("=" * 60)
     print("Testing Addition")
-    print("=" * 60)
 
     modulus = 11
-    x1 = Basic("x1", Mod(modulus))
-    x2 = Basic("x2", Mod(modulus))
+    x1 = Var("x1", Mod(modulus))
+    x2 = Var("x2", Mod(modulus))
 
     test_cases = [
         (5, 3, 8),  # 5 + 3 = 8 mod 11
@@ -47,13 +45,11 @@ def test_addition():
 
 def test_subtraction():
     """Test modular subtraction."""
-    print("=" * 60)
     print("Testing Subtraction")
-    print("=" * 60)
 
     modulus = 11
-    x1 = Basic("x1", Mod(modulus))
-    x2 = Basic("x2", Mod(modulus))
+    x1 = Var("x1", Mod(modulus))
+    x2 = Var("x2", Mod(modulus))
 
     test_cases = [
         (5, 3, 2),  # 5 - 3 = 2 mod 11
@@ -76,13 +72,10 @@ def test_subtraction():
 
 def test_multiplication():
     """Test modular multiplication."""
-    print("=" * 60)
     print("Testing Multiplication")
-    print("=" * 60)
-
     modulus = 5
-    x1 = Basic("x1", Mod(modulus))
-    x2 = Basic("x2", Mod(modulus))
+    x1 = Var("x1", Mod(modulus))
+    x2 = Var("x2", Mod(modulus))
 
     test_cases = [
         (2, 3, 1),  # 2 * 3 = 6 mod 5 = 1
@@ -91,16 +84,6 @@ def test_multiplication():
         (0, 5, 0),  # 0 * 5 = 0 mod 5 = 0
         (1, 4, 4),  # 1 * 4 = 4 mod 5 = 4
     ]
-
-    # modulus = 11
-    # test_cases = [
-    #     (5, 3, 4),  # 5 * 3 = 15 mod 11 = 4
-    #     (7, 4, 6),  # 7 * 4 = 28 mod 11 = 6
-    #     (2, 6, 1),  # 2 * 6 = 12 mod 11 = 1
-    #     (0, 5, 0),  # 0 * 5 = 0 mod 11
-    #     (1, 8, 8),  # 1 * 8 = 8 mod 11
-    # ]
-
     for a, b, expected in test_cases:
         expr = x1 * x2
         result = run(expr, {"x1": a, "x2": b})
@@ -115,15 +98,9 @@ def test_multiplication():
 
 def test_exponentiation():
     """Test modular exponentiation."""
-    print("=" * 60)
     print("Testing Exponentiation")
-    print("=" * 60)
-
     modulus = 11
-    x1 = Basic("x1", Mod(modulus))
-
-    # Test cases: (base, exponent, expected)
-    # Note: Currently only supports constant exponents
+    x1 = Var("x1", Mod(modulus))
     test_cases = [
         (2, 3, 8),  # 2^3 = 8 mod 11
         (3, 2, 9),  # 3^2 = 9 mod 11
@@ -153,9 +130,9 @@ def test_mixed_operations():
     print("=" * 60)
 
     modulus = 11
-    x1 = Basic("x1", Mod(modulus))
-    x2 = Basic("x2", Mod(modulus))
-    x3 = Basic("x3", Mod(modulus))
+    x1 = Var("x1", Mod(modulus))
+    x2 = Var("x2", Mod(modulus))
+    x3 = Var("x3", Mod(modulus))
 
     # Test: (x1 + x2) * x3
     test_cases = [
@@ -202,7 +179,7 @@ def main():
 
     try:
         # test_addition()
-        # test_subtraction()
+        test_subtraction()
         test_multiplication()
         test_exponentiation()
         test_mixed_operations()

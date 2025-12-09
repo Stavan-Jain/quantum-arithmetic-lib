@@ -9,7 +9,7 @@ import numpy as np
 from qiskit import QuantumCircuit
 from qiskit.quantum_info import Statevector
 from typing import Dict, Union, Tuple
-from .expr import Expr, Basic
+from .expr import Expr, Var
 from .compile import CompilationContext, _compile_with_context
 from .qtype import QType, Mod, Maybe
 
@@ -175,7 +175,7 @@ def _initialize_inputs(
     # Collect all Basic expressions and their values
     basic_values = {}  # Map from Basic expr to (qubits, value, qtype)
 
-    def collect_basic(basic_expr: Basic):
+    def collect_basic(basic_expr: Var):
         if basic_expr.name not in inputs:
             raise ValueError(
                 f"Missing input value for Basic expression '{basic_expr.name}'. "
@@ -223,7 +223,7 @@ def _initialize_inputs(
 
 def _traverse_and_initialize(expr: Expr, init_func, ctx: CompilationContext):
     """Traverse expression tree and collect/initialize Basic expressions."""
-    if isinstance(expr, Basic):
+    if isinstance(expr, Var):
         init_func(expr)
     elif hasattr(expr, "left") and hasattr(expr, "right"):
         # Binary operations

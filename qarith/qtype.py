@@ -39,27 +39,6 @@ class Mod:
         return math.ceil(math.log2(self.N))
 
 
-# TODO: not sure how to do this. Use Maybe monad for now.
-# @dataclass(frozen=True)
-# class Sum:
-#     inner_types: tuple[QType, ...]
-
-#     def __repr__(self) -> str:
-#         return f"Sum({self.inner_types})"
-
-#     def __post_init__(self):
-#         if not all(isinstance(ty, QType) for ty in self.inner_types):
-#             raise ValueError(f"Sum inner types must be QTypes, got {self.inner_types}")
-
-#     @property
-#     def n_bits(self) -> int:
-#         return max(ty.n_bits for ty in self.inner_types)
-
-#     @classmethod
-#     def of(cls, *types: QType) -> Sum:
-#         return cls(types)
-
-
 @dataclass(frozen=True)
 class Maybe:
     """Maybe type: T | None, where T is a QType.

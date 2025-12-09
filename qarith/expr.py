@@ -118,17 +118,8 @@ class Expr(ABC):
 
 # Basic expression classes
 @dataclass(frozen=True)
-class Basic(Expr):
-    """Black-box oracle for block encoding a matrix (parameter).
-
-    Similar to cobble's Basic class, this represents a parameter/oracle
-    that can be used in expressions. The actual quantum circuit implementation
-    is provided when compiling.
-
-    Attributes:
-        name: Name of the black-box oracle (e.g., "A", "B", "X", "H")
-        qtype_: The quantum type of this expression
-    """
+class Var(Expr):
+    """Variable: v"""
 
     name: str
     qtype_: QType
@@ -156,9 +147,9 @@ class Basic(Expr):
 
 @dataclass(frozen=True)
 class Const(Expr):
-    """Literal value: v
+    """Literal value: c
 
-    Note: Constants need a modulus to have a type. Use Basic with a constant
+    Note: Constants need a modulus to have a type. Use Const with a constant
     value instead, or provide the modulus explicitly.
     """
 
@@ -170,7 +161,7 @@ class Const(Expr):
         if self.modulus is None:
             raise ValueError(
                 f"Const({self.value}) requires a modulus. "
-                f"Either provide modulus parameter or use Basic expression."
+                f"Either provide modulus parameter or use Const expression."
             )
         return Mod(self.modulus)
 
