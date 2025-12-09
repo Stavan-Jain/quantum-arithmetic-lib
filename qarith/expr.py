@@ -136,7 +136,6 @@ class Var(Expr):
     def circuit(self) -> Circuit:
         from .compile import CompilationContext, _compile_with_context
 
-        # Create context at top level - this ensures CSE works across the entire expression tree
         ctx = CompilationContext()
         return _compile_with_context(self, ctx)
 

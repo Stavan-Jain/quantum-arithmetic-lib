@@ -59,7 +59,6 @@ class Circuit:
         expr_data_qubits: List[int] | None = None,
     ):
         self.n_qubits = n_qubits
-        self.qc = QuantumCircuit(n_qubits)
 
         # Initialize allocation if not provided
         if allocation is None:
@@ -80,6 +79,11 @@ class Circuit:
             else:
                 self.allocation = allocation
 
+        # Create QuantumCircuit without QuantumRegister first
+        # We'll use simple integer indices to avoid register ordering issues
+        # QuantumRegister can be added later if needed for visualization
+        self.qc = QuantumCircuit(n_qubits)
+
     def add(self, name: str, *qs: int, **params):
         if name == "X":
             self.qc.x(qs[0])
@@ -87,22 +91,11 @@ class Circuit:
             self.qc.cx(qs[0], qs[1])
         elif name == "CCX":
             self.qc.ccx(qs[0], qs[1], qs[2])
-        elif name in (
-            "CMUL_CONST_MOD",
-            "CMUL_MOD",
-            "CPOW_MOD",
-            "CDIV_MOD",
-            "CMUL_CONST",
-            "CPOW_CONST",
-            "CDIV_CONST",
-            "CPOW_CONST_MOD",
-            "CDIV_CONST_MOD",
-            "COMMENT",
-        ):
-            # keep as barriers/labels so you can still see structure
-            self.qc.barrier(*[q for q in qs if q >= 0])
         else:
             raise ValueError(f"Unknown gate name: {name}")
 
     def __str__(self) -> str:
         return str(self.qc.draw())
+
+    def save_png(self, filename: str) -> None:
+        self.qc.draw(output="mpl").savefig(filename, format="png")
