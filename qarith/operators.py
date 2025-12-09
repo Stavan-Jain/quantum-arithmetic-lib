@@ -9,6 +9,59 @@ from qiskit import QuantumCircuit
 from qiskit.circuit.library import QFTGate
 import numpy as np
 from typing import List
+from math import gcd
+
+
+def mod_inverse(k: int, N: int) -> int:
+    """
+    Compute modular inverse of k modulo N using extended Euclidean algorithm.
+
+    Args:
+        k: Integer to find inverse of
+        N: Modulus
+
+    Returns:
+        Modular inverse k^(-1) mod N
+
+    Raises:
+        ValueError: If k is 0 or not invertible modulo N
+    """
+    if k == 0:
+        raise ValueError("0 has no modular inverse")
+    t, new_t = 0, 1
+    r, new_r = N, k % N
+    while new_r != 0:
+        quotient = r // new_r
+        t, new_t = new_t, t - quotient * new_t
+        r, new_r = new_r, r - quotient * new_r
+    if r > 1:
+        raise ValueError(f"{k} is not invertible modulo {N}")
+    if t < 0:
+        t = t + N
+    return t
+
+
+def precompute_powers(a: int, n_bits: int, N: int) -> List[int]:
+    """
+    Precompute a^(2^i) mod N for i = 0, 1, ..., n_bits-1.
+
+    This is used for modular exponentiation where the base is classical.
+    The powers are computed using repeated squaring.
+
+    Args:
+        a: Base (classical)
+        n_bits: Number of bits in exponent
+        N: Modulus
+
+    Returns:
+        List where powers[i] = a^(2^i) mod N
+    """
+    powers = []
+    current = a % N
+    for i in range(n_bits):
+        powers.append(current)
+        current = (current * current) % N  # Square for next power
+    return powers
 
 
 def modular_addin_circuit(n: int, k: int, N: int) -> QuantumCircuit:
@@ -29,7 +82,7 @@ def modular_addin_circuit(n: int, k: int, N: int) -> QuantumCircuit:
         QuantumCircuit implementing the modular addition
     """
     sumbit = n + 1
-    qc = QuantumCircuit(n + 2)
+    qc = QuantumCircuit(n + 2, name=f"Addin({k}, {N})")
     sumN = QuantumCircuit(n + 1, name="Sum(N)")
     aux_q2 = n + 1
 
@@ -109,14 +162,18 @@ def modular_add_quantum_classical(
     # Apply controlled modular additions for each bit
     for i in range(n):
         tempk = 2 ** (n - (i + 1))
-        addin = modular_addin_circuit(n, tempk, N).to_gate().control(1)
-        addin.name = f"Addin({tempk})"
+        addin_circ = modular_addin_circuit(n, tempk, N)
+        addin = addin_circ.to_gate()
+        addin.name = f"Addin({tempk}, {N})"
+        addin_controlled = addin.control(1)
+        addin_controlled.name = f"C-Addin({tempk}, {N})"
         # Control from a_qubits[i], target aux_qubits
         control_qubit = a_qubits[n - (i + 1)]
-        circ.append(addin, [control_qubit] + aux_qubits[:])
+        circ.append(addin_controlled, [control_qubit] + aux_qubits[:])
 
     # Final addition with k
-    addin_kN = modular_addin_circuit(n, k, N).to_gate()
+    addin_kN_circ = modular_addin_circuit(n, k, N)
+    addin_kN = addin_kN_circ.to_gate()
     addin_kN.name = f"Sum({k}, {N})"
     circ.append(addin_kN, aux_qubits[:])
 
@@ -147,16 +204,22 @@ def modular_add_quantum_quantum(
     # Apply controlled modular additions for each bit of a
     for i in range(n):
         tempk = 2 ** (n - (i + 1))
-        addin = modular_addin_circuit(n, tempk, N).to_gate().control(1)
-        addin.name = f"Addin({tempk}, N)"
-        circ.append(addin, [a_qubits[n - (i + 1)]] + aux_qubits[:])
+        addin_circ = modular_addin_circuit(n, tempk, N)
+        addin = addin_circ.to_gate()
+        addin.name = f"Addin({tempk}, {N})"
+        addin_controlled = addin.control(1)
+        addin_controlled.name = f"C-Addin({tempk}, {N})"
+        circ.append(addin_controlled, [a_qubits[n - (i + 1)]] + aux_qubits[:])
 
     # Apply controlled modular additions for each bit of b
     for i in range(n):
         tempk = 2 ** (n - (i + 1))
-        addin = modular_addin_circuit(n, tempk, N).to_gate().control(1)
-        addin.name = f"Addin({tempk}, N)"
-        circ.append(addin, [b_qubits[n - (i + 1)]] + aux_qubits[:])
+        addin_circ = modular_addin_circuit(n, tempk, N)
+        addin = addin_circ.to_gate()
+        addin.name = f"Addin({tempk}, {N})"
+        addin_controlled = addin.control(1)
+        addin_controlled.name = f"C-Addin({tempk}, {N})"
+        circ.append(addin_controlled, [b_qubits[n - (i + 1)]] + aux_qubits[:])
 
 
 def modular_subtract_quantum_classical(
@@ -219,11 +282,14 @@ def modular_subtract_quantum_quantum(
     for i in range(n):
         power_of_2 = 2 ** (n - (i + 1))  # 2^(n-i-1) for MSB to LSB
         tempk = (N - power_of_2) % N
-        addin = modular_addin_circuit(n, tempk, N).to_gate().control(1)
-        addin.name = f"Sub({power_of_2}, N)"
+        addin_circ = modular_addin_circuit(n, tempk, N)
+        addin = addin_circ.to_gate()
+        addin.name = f"Addin({tempk}, {N})"
+        addin_controlled = addin.control(1)
+        addin_controlled.name = f"C-Sub({power_of_2}, {N})"
         # Control from b_qubits[n - (i + 1)], add (N - 2^i) to aux_qubits
         control_qubit = b_qubits[n - (i + 1)]
-        circ.append(addin, [control_qubit] + aux_qubits[:])
+        circ.append(addin_controlled, [control_qubit] + aux_qubits[:])
 
 
 def modular_multiply_quantum_classical(
@@ -252,12 +318,15 @@ def modular_multiply_quantum_classical(
 
     for i in range(n):
         tempk = ((2 ** (n - (i + 1))) * k) % N
-        addin = modular_addin_circuit(n, tempk, N).to_gate().control(1)
-        addin.name = f"Addin({tempk})"
+        addin_circ = modular_addin_circuit(n, tempk, N)
+        addin = addin_circ.to_gate()
+        addin.name = f"Addin({tempk}, {N})"
+        addin_controlled = addin.control(1)
+        addin_controlled.name = f"C-Multout({tempk}, {N})"
         # Control from a_qubits[n - (i + 1)], target aux_qubits
         # From notebook: control qubit is totl_qubits - i
         control_qubit = a_qubits[n - (i + 1)]
-        circ.append(addin, [control_qubit] + aux_qubits[:])
+        circ.append(addin_controlled, [control_qubit] + aux_qubits[:])
 
 
 def modular_multiply_quantum_quantum(
@@ -309,7 +378,9 @@ def modular_multiply_quantum_quantum(
         # Build multout_cir as a subcircuit
         # multout_cir needs: n qubits for control (b_qubits) + (n + 2) qubits for aux
         total_subcirc_qubits = n + (n + 2)
-        multout_subcirc = QuantumCircuit(total_subcirc_qubits)
+        multout_subcirc = QuantumCircuit(
+            total_subcirc_qubits, name=f"Multout({tempk}, {N})"
+        )
         # Map: first n qubits are b_qubits, next n+2 are aux_qubits
         b_mapped = list(range(n))
         aux_mapped = list(range(n, n + n + 2))
@@ -319,8 +390,10 @@ def modular_multiply_quantum_quantum(
 
         # Make it controlled by a_qubits[i]
         # Controlled gate needs: 1 control qubit + total_subcirc_qubits
-        multout_gate = multout_subcirc.to_gate().control(1)
-        multout_gate.name = f"Multout({tempk})"
+        multout_gate = multout_subcirc.to_gate()
+        multout_gate.name = f"Multout({tempk}, {N})"
+        multout_gate_controlled = multout_gate.control(1)
+        multout_gate_controlled.name = f"C-Multout({tempk}, {N})"
 
         # Apply: control from a_qubits[i], then b_qubits, then aux_qubits
         # The gate expects: [control] + [b_qubits (n)] + [aux_qubits (n+2)]
@@ -332,10 +405,10 @@ def modular_multiply_quantum_quantum(
                 f"aux_qubits must have exactly {n + 2} qubits, got {len(aux_qubits)}"
             )
 
-        circ.append(multout_gate, [control_qubit] + b_qubits + aux_qubits)
+        circ.append(multout_gate_controlled, [control_qubit] + b_qubits + aux_qubits)
 
 
-def modular_multiply_inplace_quantum_classical(
+def modular_multin_quantum_classical(
     circ: QuantumCircuit, a_qubits: List[int], k: int, N: int, aux_qubits: List[int]
 ) -> None:
     """
@@ -363,35 +436,8 @@ def modular_multiply_inplace_quantum_classical(
         circ.swap(a_qubits[i], aux_qubits[i + 1])
 
     # Apply inverse multout_cir with k^(-1) mod N
-    # We need to compute modular inverse of k modulo N
-    # For now, use extended Euclidean algorithm
-    def mod_inverse(k, N):
-        """Compute modular inverse of k modulo N using extended Euclidean algorithm"""
-        if k == 0:
-            return 0
-        t, new_t = 0, 1
-        r, new_r = N, k
-        while new_r != 0:
-            quotient = r // new_r
-            t, new_t = new_t, t - quotient * new_t
-            r, new_r = new_r, r - quotient * new_r
-        if r > 1:
-            raise ValueError(f"{k} is not invertible modulo {N}")
-        if t < 0:
-            t = t + N
-        return t
-
     try:
         k_inv = mod_inverse(k, N)
-        # Apply multout_cir with k_inv, but in reverse
-        # Actually, we need to apply the inverse operation
-        # For now, we'll use a simpler approach: apply multout_cir with -k_inv
-        # But this is not quite right - we need the actual inverse circuit
-
-        # Actually, looking at the notebook more carefully:
-        # IMQCM uses multout_cir, then swap, then inverse multout_cir with k^(-1)
-        # The inverse multout_cir should undo the multiplication
-        # So we apply multout_cir with k_inv
         modular_multiply_quantum_classical(
             circ,
             aux_qubits[1 : n + 1],
@@ -402,6 +448,146 @@ def modular_multiply_inplace_quantum_classical(
     except ValueError:
         raise ValueError(
             f"{k} is not invertible modulo {N}, cannot compute inplace multiplication"
+        )
+
+
+def modular_multin_quantum_quantum(
+    circ: QuantumCircuit,
+    a_qubits: List[int],
+    b_qubits: List[int],
+    N: int,
+    aux_qubits: List[int],
+) -> None:
+    """
+    Inplace modular quantum-quantum multiplier for squaring.
+
+    Computes: |a⟩ |a⟩ |0⟩ → |a^2 mod N⟩ |a⟩ |0⟩
+
+    This is a specialized version for squaring (a == b) that avoids duplicate qubit issues.
+    For squaring, we directly compute a^2 using controlled additions, similar to
+    modular_multiply_quantum_classical but adapted for quantum-quantum case.
+
+    Args:
+        circ: Quantum circuit to add gates to
+        a_qubits: Qubit indices for register a (n qubits)
+        b_qubits: Qubit indices for register b (n qubits, should be same as a_qubits for squaring)
+        N: Modulus
+        aux_qubits: Auxiliary qubits (n + 2 qubits needed)
+    """
+    n = len(a_qubits)
+    assert len(b_qubits) == n, "a and b must have same length"
+    assert len(aux_qubits) >= n + 2, f"Need at least {n + 2} auxiliary qubits"
+
+    # Check if this is squaring (a == b)
+    a_set = set(a_qubits)
+    b_set = set(b_qubits)
+    is_squaring = a_set == b_set
+
+    if not is_squaring:
+        raise ValueError(
+            "modular_multin_quantum_quantum is currently only implemented for squaring (a == b)"
+        )
+    for i in range(n):
+        power_of_2 = 2 ** (n - (i + 1))  # 2^(n-i-1)
+        control_qubit = a_qubits[n - (i + 1)]  # MSB first
+        for j in range(n):
+            bit_value = 2 ** (n - (j + 1))  # 2^(n-j-1)
+            add_value = (
+                power_of_2 * bit_value
+            ) % N  # 2^(n-i-1) * 2^(n-j-1) = 2^(2n-i-j-2)
+
+            target_qubit = a_qubits[n - (j + 1)]
+
+            # Check if control_qubit and target_qubit are the same (i == j)
+            addin_circ = modular_addin_circuit(n, add_value, N)
+            addin = addin_circ.to_gate()
+            addin.name = f"Addin({add_value}, {N})"
+            if control_qubit == target_qubit:
+                # Use single control gate when i == j
+                addin_controlled = addin.control(1)
+                addin_controlled.name = f"C-Addin({add_value}, {N})"
+                circ.append(addin_controlled, [control_qubit] + aux_qubits)
+            else:
+                # Use double control gate when i != j
+                addin_controlled = addin.control(2)
+                addin_controlled.name = f"CC-Addin({add_value}, {N})"
+                circ.append(
+                    addin_controlled, [control_qubit, target_qubit] + aux_qubits
+                )
+
+    # Now aux_qubits[1:n+1] contains a^2 mod N
+    # Swap a_qubits and aux_qubits[1:n+1] to get result in a_qubits
+    result_in_aux = aux_qubits[1 : n + 1]
+    for i in range(n):
+        circ.swap(a_qubits[i], result_in_aux[i])
+
+    # Note: b_qubits (which is the same as a_qubits for squaring) now contains the original a
+    # The aux register contains a^2, which we've swapped into a_qubits
+
+
+def _apply_controlled_inplace_multiply(
+    qc: QuantumCircuit,
+    ctrl_qubit: int,
+    target_qubits: List[int],
+    k: int,
+    N: int,
+    aux_qubits: List[int],
+) -> None:
+    """
+    Apply controlled in-place modular multiplication.
+
+    If ctrl_qubit = 1: target *= k mod N
+    If ctrl_qubit = 0: target unchanged
+
+    Uses the IMQCM approach:
+    1. Controlled outplace multiplication: aux = k * target mod N
+    2. Controlled swap: swap target and aux
+    3. Controlled inverse: uncompute using k^(-1)
+
+    Args:
+        qc: Quantum circuit to add gates to
+        ctrl_qubit: Control qubit index
+        target_qubits: Qubit indices for target register (n qubits)
+        k: Multiplication constant
+        N: Modulus
+        aux_qubits: Auxiliary qubits (n + 2 qubits needed)
+    """
+    n = len(target_qubits)
+    assert len(aux_qubits) >= n + 2, f"Need at least {n + 2} auxiliary qubits"
+    result_in_aux = aux_qubits[1 : n + 1]
+
+    # Compute k^(-1) mod N
+    k_inv = mod_inverse(k, N)
+
+    # Step 1: Controlled outplace multiplication
+    # For each bit i of target, if ctrl AND target[i], add k * 2^i to aux
+    for i in range(n):
+        tempk = ((2 ** (n - (i + 1))) * k) % N
+        addin_circ = modular_addin_circuit(n, tempk, N)
+        addin = addin_circ.to_gate()
+        addin.name = f"Addin({tempk}, {N})"
+        addin_controlled = addin.control(2)
+        addin_controlled.name = f"CC-Addin({tempk}, {N})"
+        qc.append(
+            addin_controlled, [ctrl_qubit, target_qubits[n - (i + 1)]] + aux_qubits
+        )
+
+    # Step 2: Controlled swap
+    for i in range(n):
+        qc.cswap(ctrl_qubit, target_qubits[i], result_in_aux[i])
+
+    # Step 3: Controlled inverse multiplication
+    # Subtract k_inv * (new target value) from aux to uncompute
+    for i in range(n):
+        tempk = ((2 ** (n - (i + 1))) * k_inv) % N
+        neg_tempk = (N - tempk) % N
+        addin_circ = modular_addin_circuit(n, neg_tempk, N)
+        addin = addin_circ.to_gate()
+        addin.name = f"Addin({neg_tempk}, {N})"
+        addin_controlled = addin.control(2)
+        addin_controlled.name = f"CC-Addin(-{tempk}, {N})"
+        qc.append(
+            addin_controlled, [ctrl_qubit, target_qubits[n - (i + 1)]] + aux_qubits
         )
 
 
@@ -418,11 +604,17 @@ def modular_exponentiate_quantum_classical(
 
     Computes: |x⟩ |1⟩ |0⟩ → |x⟩ |(a^x) mod N⟩ |0⟩
 
-    From notebook: For each bit i of x, if x[i] = 1, use IMQCM_cir to multiply by a^(2^i) mod N
+    This is the Shor's algorithm style exponentiation where the base is classical
+    and the exponent is quantum. All powers a^(2^i) are precomputed classically.
+
+    Algorithm:
+    1. Precompute a^(2^i) mod N for all i
+    2. For each bit x_i of x:
+       - If x_i = 1, multiply target by a^(2^i) mod N using controlled in-place multiplication
 
     Args:
         circ: Quantum circuit to add gates to
-        x_qubits: Qubit indices for exponent register (n qubits)
+        x_qubits: Qubit indices for exponent register (n qubits, quantum)
         a: Base (classical constant)
         N: Modulus
         target_qubits: Qubit indices for result register (n qubits), initialized to |1⟩
@@ -432,55 +624,26 @@ def modular_exponentiate_quantum_classical(
     assert len(target_qubits) == n, "target must have same length as x"
     assert len(aux_qubits) >= n + 2, f"Need at least {n + 2} auxiliary qubits"
 
-    # For each bit position i of x, if x[i] = 1, multiply target by a^(2^i) mod N
-    # From notebook: OMEO uses IMQCM_cir controlled by bits of x
-    # IMQCM_cir multiplies by k mod N in-place: |a⟩ |0⟩ → |(k*a) mod N⟩ |a⟩
+    # Check that a and N are coprime (required for modular exponentiation)
+    if gcd(a, N) != 1:
+        raise ValueError(
+            f"Base {a} and modulus {N} must be coprime for modular exponentiation"
+        )
 
-    # We need to build a controlled version of IMQCM_cir
-    # For each bit i of x, if x[i] = 1, apply IMQCM_cir to multiply target by a^(2^i)
-    # This is complex - for now, raise NotImplementedError
-    # Full implementation would require building the complete IMQCM_cir circuit
-    # and controlling it properly
-    raise NotImplementedError(
-        "Modular exponentiation requires implementing controlled IMQCM_cir circuit"
-    )
+    # Precompute all powers: a^1, a^2, a^4, ..., a^(2^{n-1}) mod N
+    powers = precompute_powers(a, n, N)
 
+    # For each bit of the exponent, apply controlled modular multiplication
+    # x_i controls multiplication by a^(2^i)
+    for i in range(n):
+        power = powers[i]  # a^(2^i) mod N
 
-def modular_exponentiate_quantum_quantum(
-    circ: QuantumCircuit,
-    x_qubits: List[int],
-    a_qubits: List[int],
-    N: int,
-    target_qubits: List[int],
-    aux_qubits: List[int],
-) -> None:
-    """
-    Outplace modular quantum-quantum exponentiation.
-
-    Computes: |x⟩ |a⟩ |1⟩ |0⟩ → |x⟩ |a⟩ |(a^x) mod N⟩ |0⟩
-
-    This is more complex and requires computing powers of a dynamically.
-
-    Args:
-        circ: Quantum circuit to add gates to
-        x_qubits: Qubit indices for exponent register (n qubits)
-        a_qubits: Qubit indices for base register (n qubits)
-        N: Modulus
-        target_qubits: Qubit indices for result register (n qubits), initialized to |1⟩
-        aux_qubits: Auxiliary qubits (need more than n + 2 for this operation)
-    """
-    n = len(x_qubits)
-    assert len(a_qubits) == n, "a and x must have same length"
-    assert len(target_qubits) == n, "target must have same length"
-    assert len(aux_qubits) >= 2 * n + 2, f"Need at least {2 * n + 2} auxiliary qubits"
-
-    # This is more complex - we need to compute powers of a dynamically
-    # For each bit position i of x:
-    #   1. Compute a^(2^i) mod N into a temporary register
-    #   2. If x[i] = 1, multiply target by this temporary value
-
-    # For now, this is a placeholder - full implementation would require
-    # more sophisticated power computation
-    raise NotImplementedError(
-        "Quantum-quantum modular exponentiation requires more complex implementation"
-    )
+        # Apply controlled in-place multiplication: if x_qubits[i] = 1, result *= power
+        _apply_controlled_inplace_multiply(
+            circ,
+            ctrl_qubit=x_qubits[i],
+            target_qubits=target_qubits,
+            k=power,
+            N=N,
+            aux_qubits=aux_qubits,
+        )

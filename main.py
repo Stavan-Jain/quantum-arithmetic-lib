@@ -18,10 +18,20 @@ def main():
     # result = run(sum, {"x1": 5, "x2": 7})
     # print(f"Result: {result} (expected: 1, since (5 + 7) mod 11 = 1)")
 
-    diff = x1 - x2
+    diff = y1 - y2
     print("diff expression: ", diff)
     print("Circuit:")
     print(diff.circuit())
+
+    times = x1 * x2
+    print("times expression: ", times)
+    print("Circuit:")
+    print(times.circuit())
+
+    pow = 3**x2
+    print("pow expression: ", pow)
+    print("Circuit:")
+    print(pow.circuit())
 
     # result = run(diff, {"x1": 5, "x2": 6})
     # print(f"Result: {result} (expected: 10, since (5 - 6) mod 11 = 10)")

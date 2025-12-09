@@ -53,10 +53,12 @@ def run(
     allocation = circuit.allocation
     data_qubits = allocation.data_qubits
     ancilla_qubits = allocation.ancilla_qubits
-    total_qubits = allocation.total_qubits()
+    # Use the actual circuit size instead of allocation.total_qubits() 
+    # to handle cases where working qubits aren't in ancilla_qubits
+    total_qubits = circuit.n_qubits
 
     # Initialize input state
-    initial_state = _initialize_inputs(expr, inputs, ctx, data_qubits, ancilla_qubits)
+    initial_state = _initialize_inputs(expr, inputs, ctx, data_qubits, ancilla_qubits, total_qubits)
 
     # Run the circuit
     final_state_full = _execute_circuit(circuit.qc, initial_state)
@@ -153,6 +155,7 @@ def _initialize_inputs(
     ctx: CompilationContext,
     data_qubits: int,
     ancilla_qubits: list[int],
+    total_qubits: int = None,
 ) -> np.ndarray:
     """
     Initialize the quantum state with input values.
@@ -168,9 +171,11 @@ def _initialize_inputs(
     Returns:
         Initial state vector as a numpy array
     """
-    total_qubits = (
-        max(data_qubits, max(ancilla_qubits) + 1) if ancilla_qubits else data_qubits
-    )
+    # Use provided total_qubits if given, otherwise calculate from allocation
+    if total_qubits is None:
+        total_qubits = (
+            max(data_qubits, max(ancilla_qubits) + 1) if ancilla_qubits else data_qubits
+        )
 
     # Collect all Basic expressions and their values
     basic_values = {}  # Map from Basic expr to (qubits, value, qtype)

@@ -416,11 +416,6 @@ def _compile_sub(expr: Sub, ctx: CompilationContext) -> Circuit:
         temp_start = aux_start + inner_n_bits + 2
         temp_inner_qubits = list(range(temp_start, temp_start + inner_n_bits))
 
-    # Separate working qubits from ancilla qubits
-    # aux_qubits and temp_inner_qubits are "working" qubits that don't need to be postselected
-    # Only child_ancilla_qubits need to be postselected to |0⟩
-    ancilla_qubits: List[int] = child_ancilla_qubits
-
     # Calculate total qubits needed (including working qubits)
     # Layout: [operand data ...][result (n_bits)][child ancillas][aux (inner_n_bits+2)][temp (optional inner_n_bits)]
     temp_space = inner_n_bits if need_temp_space else 0
@@ -435,9 +430,16 @@ def _compile_sub(expr: Sub, ctx: CompilationContext) -> Circuit:
     )
     data_qubits_count = max(result_qubits) + 1
 
+    # For the allocation, we need to include ALL ancillas for correct state vector size,
+    # but distinguish between those that need postselection vs working qubits.
+    # We'll store the working qubits info in a way the simulator can understand.
+    all_ancilla_qubits = child_ancilla_qubits + aux_qubits
+    if need_temp_space and temp_inner_qubits:
+        all_ancilla_qubits += temp_inner_qubits
+
     merged_allocation = QubitAllocation(
         data_qubits=data_qubits_count,
-        ancilla_qubits=ancilla_qubits,  # Only child ancillas need postselection
+        ancilla_qubits=child_ancilla_qubits,  # Only ancillas needing postselection
         expr_data_qubits=result_qubits,  # Expression's result qubits
     )
     merged_circ = Circuit(n_qubits=total_qubits, allocation=merged_allocation)
@@ -464,9 +466,6 @@ def _compile_sub(expr: Sub, ctx: CompilationContext) -> Circuit:
     left_is_const = isinstance(expr.left, Const)
     right_is_const = isinstance(expr.right, Const)
 
-    # Copy left operand to result
-    _copy_qubits(merged_circ, left_inner_qubits, result_inner_qubits)
-
     if left_is_const and right_is_const:
         # Both constants: compute (left.value - right.value) mod N directly
         result_value = (expr.left.value - expr.right.value) % modulus
@@ -480,18 +479,48 @@ def _compile_sub(expr: Sub, ctx: CompilationContext) -> Circuit:
         # Result is in aux_qubits[1:inner_n_bits+1], copy it back
         _copy_qubits(merged_circ, aux_qubits[1 : inner_n_bits + 1], result_inner_qubits)
     elif right_is_const:
-        # Right is constant: use modular_subtract_quantum_classical
+        # Right is constant: copy left to result, then subtract right constant
+        _copy_qubits(merged_circ, left_inner_qubits, result_inner_qubits)
         operators.modular_subtract_quantum_classical(
             merged_circ.qc, result_inner_qubits, expr.right.value, modulus, aux_qubits
         )
         # Result is in aux_qubits[1:inner_n_bits+1], copy it back
         _copy_qubits(merged_circ, aux_qubits[1 : inner_n_bits + 1], result_inner_qubits)
     else:
-        # Both quantum: use modular_subtract_quantum_quantum
-        operators.modular_subtract_quantum_quantum(
-            merged_circ.qc, result_inner_qubits, right_inner_qubits, modulus, aux_qubits
-        )
-        # Result is in aux_qubits[1:inner_n_bits+1], copy it back
+        # Both quantum: implement a - b as a + (N - b) using working addition
+        # This is mathematically correct: a - b ≡ a + (N - b) (mod N)
+
+        # Use the exact same pattern as modular_add_quantum_quantum
+        # but replace each 2^i with (N - 2^i) for the right operand
+
+        # Apply controlled modular additions for each bit of a (left operand)
+        for i in range(inner_n_bits):
+            tempk = 2 ** (inner_n_bits - (i + 1))
+            addin = (
+                operators.modular_addin_circuit(inner_n_bits, tempk, modulus)
+                .to_gate()
+                .control(1)
+            )
+            addin.name = f"Addin({tempk}, N)"
+            merged_circ.qc.append(
+                addin, [left_inner_qubits[inner_n_bits - (i + 1)]] + aux_qubits[:]
+            )
+
+        # Apply controlled modular additions for each bit of b, but with (N - 2^i)
+        for i in range(inner_n_bits):
+            tempk = 2 ** (inner_n_bits - (i + 1))
+            neg_tempk = (modulus - tempk) % modulus  # This is N - 2^i
+            addin = (
+                operators.modular_addin_circuit(inner_n_bits, neg_tempk, modulus)
+                .to_gate()
+                .control(1)
+            )
+            addin.name = f"Addin(-{tempk}, N)"
+            merged_circ.qc.append(
+                addin, [right_inner_qubits[inner_n_bits - (i + 1)]] + aux_qubits[:]
+            )
+
+        # Result is in aux_qubits[1:inner_n_bits+1]
         _copy_qubits(merged_circ, aux_qubits[1 : inner_n_bits + 1], result_inner_qubits)
 
     if isinstance(ty, Maybe) and result_error_flag_qubit is not None:
@@ -640,169 +669,359 @@ def _compile_mul(expr: Mul, ctx: CompilationContext) -> Circuit:
 
 
 def _compile_pow(expr: Pow, ctx: CompilationContext) -> Circuit:
-    """Compile a Pow expression to a circuit using modular arithmetic."""
-    # Get qubits and circuits for operands
-    base_qubits, base_circ = ctx.get_or_compile(expr.base)
+    """
+    Compile a Pow expression to a circuit using modular arithmetic.
 
-    # Handle exponent: it can be int or Expr
-    if isinstance(expr.exponent, int):
-        # Convert int exponent to Const expression
-        from .expr import Const
+    Handles three cases:
+    1. Both base and exponent are constants: compute classically
+    2. Base is quantum, exponent is classical (x^a): repeated squaring with quantum mult
+    3. Base is classical, exponent is quantum (a^x): Shor-style with precomputed powers
 
-        modulus, _ = _get_modulus_and_inner_n_bits(expr.base.qtype())
-        exp_expr = Const(expr.exponent, modulus=modulus)
-        exp_qubits, exp_circ = ctx.get_or_compile(exp_expr)
-    else:
-        exp_qubits, exp_circ = ctx.get_or_compile(expr.exponent)
-
-    n_bits = expr.qtype().n_bits
-    ty = expr.qtype()
-
-    # Extract modulus
-    modulus, _ = _get_modulus_and_inner_n_bits(ty)
-
-    # Determine total qubits needed
-    max_data_qubit = max(
-        max(base_qubits) if base_qubits else 0,
-        max(exp_qubits) if exp_qubits else 0,
-        n_bits - 1,  # Result needs n_bits
-    )
-
-    # Ancillas: max of both circuits' ancillas + modular exponentiation ancillas
-    max_ancillas = max(
-        len(base_circ.allocation.ancilla_qubits),
-        len(exp_circ.allocation.ancilla_qubits),
-    )
-    modular_ancillas = n_bits + 2  # For modular operations
-
-    total_ancillas = max_ancillas + modular_ancillas
-
-    # Allocate aux qubits for modular exponentiation (n + 2 qubits needed)
-    aux_start = max_data_qubit + 1 + max_ancillas
-    aux_qubits = list(range(aux_start, aux_start + n_bits + 2))
-    # Result will be in aux_qubits[1:n_bits+1] (initialized to |1⟩)
-    temp_result_qubits = aux_qubits[1 : n_bits + 1]
-
-    # Allocate actual result qubits for the expression
-    result_start = aux_start + n_bits + 2
-    expr_result_qubits = list(range(result_start, result_start + n_bits))
-
-    total_qubits = max(max_data_qubit + 1 + total_ancillas, result_start + n_bits)
-
-    # Create merged circuit
-    merged_allocation = QubitAllocation(
-        data_qubits=max_data_qubit + 1,
-        ancilla_qubits=list(
-            range(max_data_qubit + 1, max_data_qubit + 1 + total_ancillas)
-        ),
-        expr_data_qubits=expr_result_qubits,  # Expression's result qubits
-    )
-    merged_circ = Circuit(n_qubits=total_qubits, allocation=merged_allocation)
-
-    # Remap and compose base circuit
-    base_ancilla_target = list(
-        range(max_data_qubit + 1, max_data_qubit + 1 + max_ancillas)
-    )
-    base_remapped = _remap_circuit(base_circ, base_ancilla_target, base_qubits)
-    _compose_circuit(merged_circ, base_remapped)
-
-    # Remap and compose exponent circuit
-    exp_ancilla_target = list(
-        range(max_data_qubit + 1, max_data_qubit + 1 + max_ancillas)
-    )
-    exp_remapped = _remap_circuit(exp_circ, exp_ancilla_target, exp_qubits)
-    _compose_circuit(merged_circ, exp_remapped)
-
-    # Initialize result to |1⟩ (required for exponentiation)
-    if n_bits > 0:
-        merged_circ.qc.x(temp_result_qubits[0])  # Set LSB to 1
-
-    # Check if operands are constants
+    Note: x^y where both are quantum is not supported (too expensive).
+    """
     from .expr import Const
 
+    # Determine what's constant vs quantum
     base_is_const = isinstance(expr.base, Const)
     exp_is_const = isinstance(expr.exponent, (int, Const))
 
-    if base_is_const and exp_is_const:
-        # Both constants: result is (base^exp) mod N
-        exp_value = (
-            expr.exponent if isinstance(expr.exponent, int) else expr.exponent.value
-        )
-        result_value = pow(expr.base.value, exp_value, modulus)
-        # Reset result qubits
-        if n_bits > 0:
-            merged_circ.qc.x(temp_result_qubits[0])  # Reset LSB
-        _init_constant(merged_circ, expr_result_qubits, result_value)
-    elif base_is_const:
-        # Base is constant: use quantum-classical exponentiation
-        # This requires controlled IMQCM_cir which is not yet fully implemented
-        raise NotImplementedError(
-            "Modular exponentiation with quantum exponent is not yet implemented"
-        )
-    elif exp_is_const:
-        # Exponent is constant: use black box for now
-        _compile_pow_box(
-            merged_circ,
-            base_qubits,
-            exp_qubits,
-            expr_result_qubits,
-            ty,
-            expr.base.qtype(),
-        )
+    # Get type information
+    ty = expr.qtype()
+    modulus, inner_n_bits = _get_modulus_and_inner_n_bits(ty)
+
+    # Get exponent value if constant
+    if isinstance(expr.exponent, int):
+        exp_value = expr.exponent
+    elif isinstance(expr.exponent, Const):
+        exp_value = expr.exponent.value
     else:
-        # Both quantum: use black box for now
-        _compile_pow_box(
-            merged_circ,
-            base_qubits,
-            exp_qubits,
-            expr_result_qubits,
-            ty,
-            expr.base.qtype(),
+        exp_value = None
+
+    # Get base value if constant
+    if isinstance(expr.base, Const):
+        base_value = expr.base.value
+    else:
+        base_value = None
+
+    # Case 1: Both constant - compute classically
+    if base_is_const and exp_is_const:
+        result_qubits = ctx.get_or_allocate_qubits(expr)
+        result_value = pow(base_value, exp_value, modulus)
+
+        allocation = QubitAllocation(
+            data_qubits=max(result_qubits) + 1 if result_qubits else 0,
+            ancilla_qubits=[],
+            expr_data_qubits=result_qubits,
+        )
+        circ = Circuit(n_qubits=ctx.allocation.total_qubits(), allocation=allocation)
+        _init_constant(circ, result_qubits, result_value)
+
+        ctx.expr_to_qubits[expr] = result_qubits
+        return circ
+
+    # Case 2: a^x - Classical base, quantum exponent (Shor's algorithm style)
+    if base_is_const and not exp_is_const:
+        return _compile_pow_classical_base_quantum_exp(
+            expr, ctx, base_value, modulus, inner_n_bits
         )
 
-    # Copy result from temp to final result qubits
-    _copy_qubits(merged_circ, temp_result_qubits, expr_result_qubits)
+    # Case 3: x^a - Quantum base, classical exponent
+    if not base_is_const and exp_is_const:
+        return _compile_pow_quantum_base_classical_exp(
+            expr, ctx, exp_value, modulus, inner_n_bits
+        )
 
-    # Update context to use expr_result_qubits as the output
-    ctx.expr_to_qubits[expr] = expr_result_qubits
+    raise NotImplementedError(
+        "Quantum-quantum exponentiation (x^y where both x and y are in superposition) "
+        "is not supported due to exponential resource requirements. "
+        "Consider using a^x (classical base) or x^a (classical exponent) instead."
+    )
+
+
+def _compile_pow_classical_base_quantum_exp(
+    expr: Pow,
+    ctx: CompilationContext,
+    base_value: int,
+    modulus: int,
+    inner_n_bits: int,
+) -> Circuit:
+    """
+    Compile a^x where a is classical and x is quantum.
+
+    This is the Shor's algorithm style exponentiation.
+    Uses precomputed powers: a^1, a^2, a^4, ..., a^(2^{n-1}) mod N
+
+    For each bit x_i of the exponent:
+        if x_i = 1: result *= a^(2^i) mod N
+    """
+    from math import gcd
+
+    # Check coprimality (required for modular exponentiation to be well-defined)
+    if gcd(base_value, modulus) != 1:
+        raise ValueError(
+            f"Base {base_value} and modulus {modulus} must be coprime for modular exponentiation"
+        )
+
+    # Get qubits for exponent
+    exp_qubits, exp_circ = ctx.get_or_compile(expr.exponent)
+    exp_type = expr.exponent.qtype()
+    exp_inner_qubits, exp_error_flag = _extract_maybe_components(exp_qubits, exp_type)
+
+    n = len(exp_inner_qubits)
+    ty = expr.qtype()
+    n_bits = ty.n_bits
+
+    # Precompute powers: a^(2^i) mod N
+    from .operators import precompute_powers
+
+    powers = precompute_powers(base_value, n, modulus)
+
+    # Allocate qubits
+    max_data_qubit = max(exp_inner_qubits) if exp_inner_qubits else 0
+    max_exp_ancillas = len(exp_circ.allocation.ancilla_qubits)
+
+    # Layout: [exp_data][result (n_bits)][exp_ancillas][aux (inner_n_bits+2)]
+    result_start = max_data_qubit + 1
+    result_qubits = list(range(result_start, result_start + n_bits))
+    result_inner_qubits = result_qubits[:inner_n_bits]
+    result_error_flag_qubit = (
+        result_qubits[inner_n_bits] if isinstance(ty, Maybe) else None
+    )
+
+    exp_ancilla_start = result_start + n_bits
+    exp_ancilla_qubits = list(
+        range(exp_ancilla_start, exp_ancilla_start + max_exp_ancillas)
+    )
+
+    aux_start = exp_ancilla_start + max_exp_ancillas
+    aux_qubits = list(range(aux_start, aux_start + inner_n_bits + 2))
+
+    total_qubits = aux_start + inner_n_bits + 2
+
+    # Create circuit
+    merged_allocation = QubitAllocation(
+        data_qubits=result_start + n_bits,
+        ancilla_qubits=exp_ancilla_qubits + aux_qubits,
+        expr_data_qubits=result_qubits,
+    )
+    merged_circ = Circuit(n_qubits=total_qubits, allocation=merged_allocation)
+
+    # Compose exponent circuit
+    exp_remapped = _remap_circuit(
+        exp_circ, exp_ancilla_qubits[:max_exp_ancillas], exp_qubits
+    )
+    _compose_circuit(merged_circ, exp_remapped)
+
+    # Initialize result to |1⟩
+    if inner_n_bits > 0:
+        merged_circ.qc.x(result_inner_qubits[0])  # LSB = 1
+
+    # For each bit of exponent, apply controlled modular multiplication
+    from .operators import _apply_controlled_inplace_multiply
+
+    for i in range(n):
+        power = powers[i]  # a^(2^i) mod N
+
+        # Controlled in-place multiplication: if exp_inner_qubits[i] = 1, result *= power
+        _apply_controlled_inplace_multiply(
+            merged_circ.qc,
+            ctrl_qubit=exp_inner_qubits[i],
+            target_qubits=result_inner_qubits,
+            k=power,
+            N=modulus,
+            aux_qubits=aux_qubits,
+        )
+
+    # Handle error flags
+    if isinstance(ty, Maybe) and result_error_flag_qubit is not None:
+        if exp_error_flag is not None:
+            merged_circ.qc.cx(exp_error_flag, result_error_flag_qubit)
+
+    ctx.expr_to_qubits[expr] = result_qubits
     ctx.allocation = merged_allocation
     return merged_circ
 
 
-def _compile_pow_box(
-    circ: Circuit,
-    base_qubits: List[int],
-    exp_qubits: List[int],
-    result_qubits: List[int],
-    result_type: QType,
-    base_type: QType,
-):
-    """Black box implementation of modular exponentiation.
-
-    For now, this just copies the base to the result as a placeholder.
-    In a real implementation, this would compute base^exponent mod N.
-
-    Args:
-        circ: Circuit to add gates to
-        base_qubits: Qubit indices for the base
-        exp_qubits: Qubit indices for the exponent
-        result_qubits: Qubit indices for the result
-        result_type: Type of the result expression
-        base_type: Type of the base expression
+def _compile_pow_quantum_base_classical_exp(
+    expr: Pow,
+    ctx: CompilationContext,
+    exp_value: int,
+    modulus: int,
+    inner_n_bits: int,
+) -> Circuit:
     """
-    # Extract inner qubits and error flags
+    Compile x^a where x is quantum and a is classical.
+
+    This requires computing x^(2^i) via repeated squaring of quantum registers.
+    Much more expensive than classical base case.
+
+    For small exponents, we use direct multiplication:
+    x^1 = x
+    x^2 = x * x
+    x^3 = x * x * x (or x^2 * x)
+    etc.
+
+    For larger exponents, we use square-and-multiply with quantum squaring.
+    """
+    # Get qubits for base
+    base_qubits, base_circ = ctx.get_or_compile(expr.base)
+    base_type = expr.base.qtype()
     base_inner_qubits, base_error_flag = _extract_maybe_components(
         base_qubits, base_type
     )
-    result_inner_qubits, result_error_flag_qubit = _extract_maybe_components(
-        result_qubits, result_type
-    )
-    _copy_qubits(circ, base_inner_qubits, result_inner_qubits)
 
-    # Handle error flags if result is Maybe type
-    if isinstance(result_type, Maybe) and result_error_flag_qubit is not None:
+    ty = expr.qtype()
+    n_bits = ty.n_bits
+
+    # Special cases
+    if exp_value == 0:
+        # x^0 = 1
+        result_qubits = ctx.get_or_allocate_qubits(expr)
+        allocation = QubitAllocation(
+            data_qubits=max(result_qubits) + 1,
+            ancilla_qubits=[],
+            expr_data_qubits=result_qubits,
+        )
+        circ = Circuit(n_qubits=ctx.allocation.total_qubits(), allocation=allocation)
+        _init_constant(circ, result_qubits[:inner_n_bits], 1)
+        ctx.expr_to_qubits[expr] = result_qubits
+        return circ
+
+    if exp_value == 1:
+        # x^1 = x, just copy
+        result_qubits = ctx.get_or_allocate_qubits(expr)
+        max_data = max(max(base_inner_qubits), max(result_qubits))
+        allocation = QubitAllocation(
+            data_qubits=max_data + 1,
+            ancilla_qubits=list(base_circ.allocation.ancilla_qubits),
+            expr_data_qubits=result_qubits,
+        )
+        circ = Circuit(
+            n_qubits=max_data + 1 + len(allocation.ancilla_qubits),
+            allocation=allocation,
+        )
+        _compose_circuit(circ, base_circ)
+        _copy_qubits(circ, base_inner_qubits, result_qubits[:inner_n_bits])
+        ctx.expr_to_qubits[expr] = result_qubits
+        return circ
+
+    # For exp_value >= 2, use square-and-multiply
+    # Count how many bits in exponent
+    exp_bits = exp_value.bit_length()
+
+    # We need intermediate registers for powers of x
+    # power_regs[i] will hold x^(2^i)
+    # We only need registers for powers that are used (where exp bit is set or needed for squaring)
+
+    max_data_qubit = max(base_inner_qubits) if base_inner_qubits else 0
+    max_base_ancillas = len(base_circ.allocation.ancilla_qubits)
+
+    # Layout:
+    # [base_data][power_reg_0 (n)][power_reg_1 (n)]...[result (n_bits)][ancillas][aux (n+2)]
+
+    # Allocate power registers (we need exp_bits of them)
+    power_reg_start = max_data_qubit + 1
+    power_registers = []
+    for i in range(exp_bits):
+        reg = list(
+            range(
+                power_reg_start + i * inner_n_bits,
+                power_reg_start + (i + 1) * inner_n_bits,
+            )
+        )
+        power_registers.append(reg)
+
+    result_start = power_reg_start + exp_bits * inner_n_bits
+    result_qubits = list(range(result_start, result_start + n_bits))
+    result_inner_qubits = result_qubits[:inner_n_bits]
+    result_error_flag_qubit = (
+        result_qubits[inner_n_bits] if isinstance(ty, Maybe) else None
+    )
+
+    ancilla_start = result_start + n_bits
+    base_ancilla_qubits = list(range(ancilla_start, ancilla_start + max_base_ancillas))
+
+    aux_start = ancilla_start + max_base_ancillas
+    aux_qubits = list(range(aux_start, aux_start + inner_n_bits + 2))
+
+    total_qubits = aux_start + inner_n_bits + 2
+
+    # Create circuit
+    all_ancillas = base_ancilla_qubits + aux_qubits
+    for reg in power_registers:
+        all_ancillas.extend(reg)  # Power registers are also ancillas
+
+    merged_allocation = QubitAllocation(
+        data_qubits=result_start + n_bits,
+        ancilla_qubits=all_ancillas,
+        expr_data_qubits=result_qubits,
+    )
+    merged_circ = Circuit(n_qubits=total_qubits, allocation=merged_allocation)
+
+    # Compose base circuit
+    base_remapped = _remap_circuit(
+        base_circ, base_ancilla_qubits[:max_base_ancillas], base_qubits
+    )
+    _compose_circuit(merged_circ, base_remapped)
+
+    # Step 1: Copy base to power_registers[0] (this is x^1)
+    _copy_qubits(merged_circ, base_inner_qubits, power_registers[0])
+
+    # Step 2: Compute x^(2^i) by repeated squaring
+    from . import operators
+
+    for i in range(1, exp_bits):
+        # power_registers[i] = power_registers[i-1]^2 mod N
+        # Use inplace multiplier for squaring to avoid duplicate qubit issues
+        operators.modular_multin_quantum_quantum(
+            merged_circ.qc,
+            power_registers[i - 1],  # a (will become a^2)
+            power_registers[i - 1],  # b (same as a for squaring)
+            modulus,
+            aux_qubits,
+        )
+        # After modular_multin_quantum_quantum: power_registers[i-1] contains a^2
+        # Copy it to power_registers[i]
+        _copy_qubits(
+            merged_circ,
+            power_registers[i - 1],
+            power_registers[i],
+        )
+
+    # Step 3: Multiply together powers where exponent bit is set
+    # result = product of x^(2^i) for all i where exp_value has bit i set
+    first_mult = True
+    for i in range(exp_bits):
+        if (exp_value >> i) & 1:  # If bit i is set
+            if first_mult:
+                # Initialize result with first power
+                _copy_qubits(merged_circ, power_registers[i], result_inner_qubits)
+                first_mult = False
+            else:
+                # Multiply result by power_registers[i]
+                operators.modular_multiply_quantum_quantum(
+                    merged_circ.qc,
+                    result_inner_qubits,
+                    power_registers[i],
+                    modulus,
+                    aux_qubits,
+                )
+                # Result is in aux_qubits[1:inner_n_bits+1], copy back
+                # First clear result_inner_qubits (using CNOTs back)
+                _copy_qubits(
+                    merged_circ,
+                    aux_qubits[1 : inner_n_bits + 1],
+                    result_inner_qubits,
+                )
+
+    # Handle error flags
+    if isinstance(ty, Maybe) and result_error_flag_qubit is not None:
         if base_error_flag is not None:
-            circ.qc.cx(base_error_flag, result_error_flag_qubit)
+            merged_circ.qc.cx(base_error_flag, result_error_flag_qubit)
+
+    ctx.expr_to_qubits[expr] = result_qubits
+    ctx.allocation = merged_allocation
+    return merged_circ
 
 
 def _compile_floordiv(expr: Div, ctx: CompilationContext) -> Circuit:
@@ -1013,34 +1232,6 @@ def _unwrap_maybe_type(ty: QType) -> tuple[Mod, int]:
         return inner_mod, depth + 1
     else:
         raise ValueError(f"Cannot unwrap type {ty}")
-
-
-def _extract_inner_qubits(qubits: List[int], expr_type: QType) -> List[int]:
-    """
-    Extract the inner Mod type qubits from a Maybe type qubit list.
-
-    For Maybe types, the last qubit is the flag bit. This function removes
-    all flag bits to get the inner Mod type qubits.
-
-    Args:
-        qubits: List of qubit indices for the expression
-        expr_type: The type of the expression
-
-    Returns:
-        List of qubit indices for the inner Mod type (without flag bits)
-
-    Examples:
-        _extract_inner_qubits([0, 1, 2, 3], Mod(11)) -> [0, 1, 2, 3]
-        _extract_inner_qubits([0, 1, 2, 3, 4], Maybe(Mod(11))) -> [0, 1, 2, 3]
-    """
-    if isinstance(expr_type, Mod):
-        return qubits
-    elif isinstance(expr_type, Maybe):
-        # Remove the last qubit (flag bit) and recurse
-        inner_qubits = qubits[:-1]
-        return _extract_inner_qubits(inner_qubits, expr_type.inner_type)
-    else:
-        raise ValueError(f"Cannot extract qubits from type {expr_type}")
 
 
 def _get_modulus_and_inner_n_bits(ty: QType) -> tuple[int, int]:
