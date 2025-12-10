@@ -843,26 +843,27 @@ def _compile_pow_classical_base_quantum_exp(
 
 
 def _compile_pow_quantum_base_classical_exp(
-    expr: Pow,
-    ctx: CompilationContext,
+    expr: "Pow",
+    ctx: "CompilationContext",
     exp_value: int,
     modulus: int,
     inner_n_bits: int,
-) -> Circuit:
+) -> "Circuit":
     """
     Compile x^a where x is quantum and a is classical.
 
-    This requires computing x^(2^i) via repeated squaring of quantum registers.
-    Much more expensive than classical base case.
+    Uses separate registers for each power to avoid aux register clearing issues.
+    Space: O(a * n) qubits for intermediate powers.
 
-    For small exponents, we use direct multiplication:
-    x^1 = x
-    x^2 = x * x
-    x^3 = x * x * x (or x^2 * x)
-    etc.
-
-    For larger exponents, we use square-and-multiply with quantum squaring.
+    Key insight: modular_multiply_quantum_quantum ADDS the result to aux (aux += a*b),
+    so aux must be |0⟩ before each multiplication. We maintain this by:
+    1. Copying result from aux to destination power register
+    2. Clearing aux by XORing with destination (same values cancel to 0)
     """
+    from .circuit import Circuit, QubitAllocation
+    from .qtype import Maybe
+    from . import operators
+
     # Get qubits for base
     base_qubits, base_circ = ctx.get_or_compile(expr.base)
     base_type = expr.base.qtype()
@@ -873,22 +874,22 @@ def _compile_pow_quantum_base_classical_exp(
     ty = expr.qtype()
     n_bits = ty.n_bits
 
-    # Special cases
+    # Special case: x^0 = 1
     if exp_value == 0:
-        # x^0 = 1
         result_qubits = ctx.get_or_allocate_qubits(expr)
         allocation = QubitAllocation(
             data_qubits=max(result_qubits) + 1,
             ancilla_qubits=[],
             expr_data_qubits=result_qubits,
         )
-        circ = Circuit(n_qubits=ctx.allocation.total_qubits(), allocation=allocation)
+        total = max(ctx.allocation.total_qubits(), max(result_qubits) + 1)
+        circ = Circuit(n_qubits=total, allocation=allocation)
         _init_constant(circ, result_qubits[:inner_n_bits], 1)
         ctx.expr_to_qubits[expr] = result_qubits
         return circ
 
+    # Special case: x^1 = x
     if exp_value == 1:
-        # x^1 = x, just copy
         result_qubits = ctx.get_or_allocate_qubits(expr)
         max_data = max(max(base_inner_qubits), max(result_qubits))
         allocation = QubitAllocation(
@@ -905,116 +906,77 @@ def _compile_pow_quantum_base_classical_exp(
         ctx.expr_to_qubits[expr] = result_qubits
         return circ
 
-    # For exp_value >= 2, use square-and-multiply
-    # Count how many bits in exponent
-    exp_bits = exp_value.bit_length()
-
-    # We need intermediate registers for powers of x
-    # power_regs[i] will hold x^(2^i)
-    # We only need registers for powers that are used (where exp bit is set or needed for squaring)
-
+    # For exp_value >= 2: allocate separate registers for each power
     max_data_qubit = max(base_inner_qubits) if base_inner_qubits else 0
     max_base_ancillas = len(base_circ.allocation.ancilla_qubits)
 
-    # Layout:
-    # [base_data][power_reg_0 (n)][power_reg_1 (n)]...[result (n_bits)][ancillas][aux (n+2)]
+    # Allocate power registers for x^1, x^2, x^3, ..., x^a
+    power_regs = []
+    next_start = max_data_qubit + 1
 
-    # Allocate power registers (we need exp_bits of them)
-    power_reg_start = max_data_qubit + 1
-    power_registers = []
-    for i in range(exp_bits):
-        reg = list(
-            range(
-                power_reg_start + i * inner_n_bits,
-                power_reg_start + (i + 1) * inner_n_bits,
-            )
-        )
-        power_registers.append(reg)
+    for i in range(exp_value):  # x^1, x^2, ..., x^a
+        reg = list(range(next_start, next_start + inner_n_bits))
+        power_regs.append(reg)
+        next_start += inner_n_bits
 
-    result_start = power_reg_start + exp_bits * inner_n_bits
+    # Result qubits
+    result_start = next_start
     result_qubits = list(range(result_start, result_start + n_bits))
     result_inner_qubits = result_qubits[:inner_n_bits]
     result_error_flag_qubit = (
         result_qubits[inner_n_bits] if isinstance(ty, Maybe) else None
     )
 
-    ancilla_start = result_start + n_bits
-    base_ancilla_qubits = list(range(ancilla_start, ancilla_start + max_base_ancillas))
+    base_ancilla_start = result_start + n_bits
+    base_ancilla_qubits = list(
+        range(base_ancilla_start, base_ancilla_start + max_base_ancillas)
+    )
 
-    aux_start = ancilla_start + max_base_ancillas
+    aux_start = base_ancilla_start + max_base_ancillas
     aux_qubits = list(range(aux_start, aux_start + inner_n_bits + 2))
+    aux_result = aux_qubits[1 : inner_n_bits + 1]
 
     total_qubits = aux_start + inner_n_bits + 2
 
-    # Create circuit
-    all_ancillas = base_ancilla_qubits + aux_qubits
-    for reg in power_registers:
-        all_ancillas.extend(reg)  # Power registers are also ancillas
-
     merged_allocation = QubitAllocation(
         data_qubits=result_start + n_bits,
-        ancilla_qubits=all_ancillas,
+        ancilla_qubits=base_ancilla_qubits,  # Only base ancillas for postselection
         expr_data_qubits=result_qubits,
     )
     merged_circ = Circuit(n_qubits=total_qubits, allocation=merged_allocation)
 
     # Compose base circuit
-    base_remapped = _remap_circuit(
-        base_circ, base_ancilla_qubits[:max_base_ancillas], base_qubits
-    )
+    if max_base_ancillas > 0:
+        base_remapped = _remap_circuit(
+            base_circ, base_ancilla_qubits[:max_base_ancillas], base_qubits
+        )
+    else:
+        base_remapped = _remap_circuit(base_circ, [], base_qubits)
     _compose_circuit(merged_circ, base_remapped)
+    _copy_qubits(merged_circ, base_inner_qubits, power_regs[0])
 
-    # Step 1: Copy base to power_registers[0] (this is x^1)
-    _copy_qubits(merged_circ, base_inner_qubits, power_registers[0])
-
-    # Step 2: Compute x^(2^i) by repeated squaring
-    from . import operators
-
-    for i in range(1, exp_bits):
-        # power_registers[i] = power_registers[i-1]^2 mod N
-        # Use inplace multiplier for squaring to avoid duplicate qubit issues
-        operators.modular_multin_quantum_quantum(
+    # Compute x^2, x^3, ..., x^a
+    # x^(i+1) = x^i * x
+    for i in range(1, exp_value):
+        # Multiply: aux_result = power_regs[i-1] * base
+        operators.modular_multiply_quantum_quantum(
             merged_circ.qc,
-            power_registers[i - 1],  # a (will become a^2)
-            power_registers[i - 1],  # b (same as a for squaring)
+            power_regs[i - 1],  # x^i
+            base_inner_qubits,  # x
             modulus,
-            aux_qubits,
+            aux_qubits,  # result goes to aux_qubits[1:n+1]
         )
-        # After modular_multin_quantum_quantum: power_registers[i-1] contains a^2
-        # Copy it to power_registers[i]
-        _copy_qubits(
-            merged_circ,
-            power_registers[i - 1],
-            power_registers[i],
-        )
+        _copy_qubits(merged_circ, aux_result, power_regs[i])
 
-    # Step 3: Multiply together powers where exponent bit is set
-    # result = product of x^(2^i) for all i where exp_value has bit i set
-    first_mult = True
-    for i in range(exp_bits):
-        if (exp_value >> i) & 1:  # If bit i is set
-            if first_mult:
-                # Initialize result with first power
-                _copy_qubits(merged_circ, power_registers[i], result_inner_qubits)
-                first_mult = False
-            else:
-                # Multiply result by power_registers[i]
-                operators.modular_multiply_quantum_quantum(
-                    merged_circ.qc,
-                    result_inner_qubits,
-                    power_registers[i],
-                    modulus,
-                    aux_qubits,
-                )
-                # Result is in aux_qubits[1:inner_n_bits+1], copy back
-                # First clear result_inner_qubits (using CNOTs back)
-                _copy_qubits(
-                    merged_circ,
-                    aux_qubits[1 : inner_n_bits + 1],
-                    result_inner_qubits,
-                )
+        # Clear aux_result for next iteration by XORing with power_regs[i]
+        # aux_result = power_regs[i] XOR power_regs[i] = 0
+        _copy_qubits(merged_circ, power_regs[i], aux_result)
 
-    # Handle error flags
+    # Final result is in power_regs[exp_value - 1] = x^a
+    # Copy to result_qubits
+    _copy_qubits(merged_circ, power_regs[exp_value - 1], result_inner_qubits)
+
+    # Handle error flags if result is Maybe type
     if isinstance(ty, Maybe) and result_error_flag_qubit is not None:
         if base_error_flag is not None:
             merged_circ.qc.cx(base_error_flag, result_error_flag_qubit)

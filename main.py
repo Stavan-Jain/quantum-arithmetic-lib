@@ -33,6 +33,11 @@ def main():
     print("Circuit:")
     print(pow.circuit())
 
+    compound = x1 + x2 * y1 - y2
+    print("compound expression: ", compound)
+    print("Circuit:")
+    print(compound.circuit())
+
     # result = run(diff, {"x1": 5, "x2": 6})
     # print(f"Result: {result} (expected: 10, since (5 - 6) mod 11 = 10)")
 
