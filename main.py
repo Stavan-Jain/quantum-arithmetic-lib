@@ -33,11 +33,10 @@ def main():
     print("Circuit:")
     print(pow.circuit())
 
-    complex = x1 + x2 * y1 - y2
-    print("complex expression: ", complex)
+    compound = x1 + x2 * y1 - y2
+    print("compound expression: ", compound)
     print("Circuit:")
-    print(complex.circuit())
-    complex.circuit().save_png("complex.png")
+    print(compound.circuit())
 
     # result = run(diff, {"x1": 5, "x2": 6})
     # print(f"Result: {result} (expected: 10, since (5 - 6) mod 11 = 10)")

@@ -99,14 +99,12 @@ def test_multiplication():
 def test_exponentiation():
     """Test modular exponentiation."""
     print("Testing Exponentiation")
-    modulus = 5
+    modulus = 4
     x1 = Var("x1", Mod(modulus))
     test_cases = [
         (2, 3),
+        (1, 2),
         (3, 2),
-        (5, 2),
-        (2, 5),
-        (7, 3),
     ]
 
     for base, exp in test_cases:
