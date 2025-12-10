@@ -1,6 +1,5 @@
 from qarith.expr import Var
 from qarith.qtype import Mod
-from qarith import run
 from tests.ecc import ecc_add
 
 
@@ -13,7 +12,9 @@ def main():
     sum = x1 + x2
     print("sum expression: ", sum)
     print("Circuit:")
-    print(sum.circuit())
+    sum_circ = sum.circuit()
+    print(sum_circ)
+    print(sum_circ.decompose())
 
     diff = y1 - y2
     print("diff expression: ", diff)
@@ -34,7 +35,14 @@ def main():
     print("compound expression: ", compound)
     print("Circuit:")
     print(compound.circuit())
-    compound.circuit().save_png("compound.png")
+    # compound.circuit().save_png("compound.png")
+
+    x3, y3 = ecc_add(x1, y1, x2, y2)
+    print("x3 expression: ", x3)
+    print("y3 expression: ", y3)
+    print("Circuit:")
+    print(x3.circuit())
+    print(y3.circuit())
 
 
 if __name__ == "__main__":

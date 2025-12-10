@@ -53,12 +53,14 @@ def run(
     allocation = circuit.allocation
     data_qubits = allocation.data_qubits
     ancilla_qubits = allocation.ancilla_qubits
-    # Use the actual circuit size instead of allocation.total_qubits() 
+    # Use the actual circuit size instead of allocation.total_qubits()
     # to handle cases where working qubits aren't in ancilla_qubits
     total_qubits = circuit.n_qubits
 
     # Initialize input state
-    initial_state = _initialize_inputs(expr, inputs, ctx, data_qubits, ancilla_qubits, total_qubits)
+    initial_state = _initialize_inputs(
+        expr, inputs, ctx, data_qubits, ancilla_qubits, total_qubits
+    )
 
     # Run the circuit
     final_state_full = _execute_circuit(circuit.qc, initial_state)

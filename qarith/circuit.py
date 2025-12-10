@@ -125,3 +125,24 @@ class Circuit:
 
     def save_png(self, filename: str) -> None:
         self.qc.draw(output="mpl").savefig(filename, format="png")
+
+    def decompose(self, reps: int = 1, **kwargs):
+        """Decompose composite gates in the circuit.
+
+        This method calls the decompose method of the underlying Qiskit QuantumCircuit
+        to expand composite gates (like Addin, Multout) into their basic gate components.
+
+        Args:
+            reps: Number of times to decompose (default: 1)
+            **kwargs: Additional arguments passed to Qiskit's decompose method
+
+        Returns:
+            A new Circuit instance with decomposed gates
+        """
+        decomposed_qc = self.qc.decompose(reps=reps, **kwargs)
+        # Create a new Circuit instance with the decomposed circuit
+        new_circ = Circuit(
+            self.n_qubits, self.allocation, self.allocation.expr_data_qubits
+        )
+        new_circ.qc = decomposed_qc
+        return new_circ
