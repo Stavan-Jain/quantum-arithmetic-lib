@@ -320,8 +320,6 @@ class Pow(Expr):
                 exp_type = self.exponent.qtype()
                 modulus = exp_type.N if isinstance(exp_type, Mod) else None
             elif isinstance(self.exponent, int):
-                # For int exponent, we need modulus from context
-                # This is a limitation - we'll handle it in compile
                 modulus = None
             else:
                 modulus = None

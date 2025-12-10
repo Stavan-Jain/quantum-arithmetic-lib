@@ -8,7 +8,7 @@ from pathlib import Path
 # Add parent directory to path to allow imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from qarith.expr import Var
+from qarith.expr import Var, Const
 from qarith.qtype import Mod
 from qarith import run
 
@@ -96,8 +96,8 @@ def test_multiplication():
     print()
 
 
-def test_exponentiation():
-    """Test modular exponentiation."""
+def test_quantum_base_classic_exp():
+    """Test quantum base, classic exponent exponentiation."""
     print("Testing Exponentiation")
     modulus = 4
     x1 = Var("x1", Mod(modulus))
@@ -169,6 +169,36 @@ def test_mixed_operations():
     print()
 
 
+# a = Const(3, modulus=5)
+# x = Var(“x”, Mod(16))
+# z = a ** x
+
+
+def test_quantum_exponent_classic_base():
+    """Test quantum exponent, classic base exponentiation."""
+    print("Testing Exponentiation")
+    modulus = 5
+    x1 = Var("x1", Mod(modulus))
+    test_cases = [
+        (2, 3),
+        (1, 2),
+        (3, 2),
+    ]
+
+    for base, exp in test_cases:
+        expected = (base**exp) % modulus
+        expr = Const(base, modulus=modulus) ** x1
+        result = run(expr, {"x1": exp})
+        status = "✓" if result == expected else "✗"
+        print(
+            f"{status} ({base} ** {exp}) mod {modulus} = {result} (expected: {expected})"
+        )
+        assert result == expected, (
+            f"Exponentiation failed: ({base} ** {exp}) mod {modulus} = {result}, expected {expected}"
+        )
+    print()
+
+
 def main():
     """Run all tests."""
     print("\n" + "=" * 60)
@@ -176,10 +206,11 @@ def main():
     print("=" * 60 + "\n")
 
     try:
+        test_quantum_exponent_classic_base()
+        test_quantum_base_classic_exp()
         test_addition()
         test_subtraction()
         test_multiplication()
-        test_exponentiation()
         test_mixed_operations()
 
         print("=" * 60)

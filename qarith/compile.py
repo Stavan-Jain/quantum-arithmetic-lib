@@ -73,11 +73,39 @@ class CompilationContext:
 
         return qubits
 
-    def get_or_compile(self, expr: Expr) -> tuple[List[int], Circuit]:
+    # def get_or_compile(self, expr: Expr) -> tuple[List[int], Circuit]:
+    #     """Get qubits and compiled circuit for an expression.
+
+    #     If already compiled, returns cached qubits and circuit.
+    #     Otherwise, compiles the expression and caches the result.
+
+    #     Args:
+    #         expr: Expression to compile
+
+    #     Returns:
+    #         Tuple of (qubit_indices, compiled_circuit)
+    #     """
+    #     # Get or allocate qubits (handles CSE)
+    #     qubits = self.get_or_allocate_qubits(expr)
+
+    #     # Check if already compiled
+    #     if expr in self.expr_to_circuit:
+    #         return qubits, self.expr_to_circuit[expr]
+
+    #     # Compile the expression
+    #     circ = _compile_with_context(expr, self)
+    #     self.expr_to_circuit[expr] = circ
+    #     return qubits, circ
+
+    def get_or_compile(self, expr: "Expr") -> tuple[list[int], "Circuit"]:
         """Get qubits and compiled circuit for an expression.
 
         If already compiled, returns cached qubits and circuit.
         Otherwise, compiles the expression and caches the result.
+
+        FIXED: Don't pre-allocate qubits for compound expressions.
+        Only allocate for leaf nodes (Var, Const). Compound expressions
+        allocate their result qubits AFTER compiling children.
 
         Args:
             expr: Expression to compile
@@ -85,15 +113,29 @@ class CompilationContext:
         Returns:
             Tuple of (qubit_indices, compiled_circuit)
         """
-        # Get or allocate qubits (handles CSE)
-        qubits = self.get_or_allocate_qubits(expr)
+        from .expr import Var, Const
 
         # Check if already compiled
         if expr in self.expr_to_circuit:
+            qubits = self.expr_to_qubits[expr]
             return qubits, self.expr_to_circuit[expr]
+
+        # For leaf nodes (Var, Const), allocate qubits first
+        # For compound expressions, the compile function will allocate
+        if isinstance(expr, (Var, Const)):
+            qubits = self.get_or_allocate_qubits(expr)
 
         # Compile the expression
         circ = _compile_with_context(expr, self)
+
+        # Get qubits (should have been set by compilation)
+        qubits = self.expr_to_qubits.get(expr)
+        if qubits is None:
+            raise RuntimeError(
+                f"Compilation of {expr} did not set qubit allocation. "
+                f"This is a bug in the compiler."
+            )
+
         self.expr_to_circuit[expr] = circ
         return qubits, circ
 

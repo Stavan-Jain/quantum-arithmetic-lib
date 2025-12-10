@@ -15,9 +15,6 @@ def main():
     print("Circuit:")
     print(sum.circuit())
 
-    # result = run(sum, {"x1": 5, "x2": 7})
-    # print(f"Result: {result} (expected: 1, since (5 + 7) mod 11 = 1)")
-
     diff = y1 - y2
     print("diff expression: ", diff)
     print("Circuit:")
@@ -37,17 +34,7 @@ def main():
     print("compound expression: ", compound)
     print("Circuit:")
     print(compound.circuit())
-
-    # result = run(diff, {"x1": 5, "x2": 6})
-    # print(f"Result: {result} (expected: 10, since (5 - 6) mod 11 = 10)")
-
-    # x3_expr, y3_expr = ecc_add(x1, y1, x2, y2)
-    # print("x3 expression: ", x3_expr)
-    # print("y3 expression: ", y3_expr)
-    # print("x3 Circuit:")
-    # print(x3_expr.circuit())
-    # print("y3 Circuit:")
-    # print(y3_expr.circuit())
+    compound.circuit().save_png("compound.png")
 
 
 if __name__ == "__main__":
