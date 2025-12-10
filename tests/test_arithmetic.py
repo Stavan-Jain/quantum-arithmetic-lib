@@ -178,10 +178,10 @@ def main():
     print("=" * 60 + "\n")
 
     try:
-        test_exponentiation()
         test_addition()
         test_subtraction()
         test_multiplication()
+        test_exponentiation()
         test_mixed_operations()
 
         print("=" * 60)

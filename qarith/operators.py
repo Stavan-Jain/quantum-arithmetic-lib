@@ -287,7 +287,6 @@ def modular_subtract_quantum_quantum(
         addin.name = f"Addin({tempk}, {N})"
         addin_controlled = addin.control(1)
         addin_controlled.name = f"C-Sub({power_of_2}, {N})"
-        # Control from b_qubits[n - (i + 1)], add (N - 2^i) to aux_qubits
         control_qubit = b_qubits[n - (i + 1)]
         circ.append(addin_controlled, [control_qubit] + aux_qubits[:])
 
@@ -354,28 +353,9 @@ def modular_multiply_quantum_quantum(
     n = len(a_qubits)
     assert len(b_qubits) == n, "a and b must have same length"
     assert len(aux_qubits) >= n + 2, f"Need at least {n + 2} auxiliary qubits"
-
-    # From notebook OMQQM_cir: For each bit i of a (from MSB to LSB),
-    # if a[i] = 1, apply controlled multout_cir with k = 2^(n-i-1)
-    # multout_cir(n, k, N): |a⟩ |b⟩ → |a⟩ |b + k*a mod N⟩
-    # So for each bit i of a, if a[i] = 1, we want: aux = aux + 2^(n-i-1) * b mod N
-
-    # We need to build a controlled multout_cir circuit
-    # multout_cir uses a_qubits as control and aux_qubits as target
-    # But in OMQQM, we want to use a_qubits[i] as control and operate on aux + b
-
-    # Actually, looking at the notebook more carefully:
-    # multout_cir(n, k, N) operates on |a⟩ |b⟩ where a is control and b is target
-    # In OMQQM, we want: for each bit i of a, if a[i] = 1, add 2^(n-i-1) * b to aux
-    # So we use a_qubits[i] as control, and multout_cir operates on b_qubits (as control) and aux_qubits (as target)
-
     # Build multout_cir circuit for each bit position
     for i in range(n):
         tempk = 2 ** (n - (i + 1))  # 2^(n-i-1) for MSB to LSB
-        # Create a multout_cir circuit: |b⟩ |aux⟩ → |b⟩ |aux + tempk * b mod N⟩
-        # This is controlled by a_qubits[i]
-
-        # Build multout_cir as a subcircuit
         # multout_cir needs: n qubits for control (b_qubits) + (n + 2) qubits for aux
         total_subcirc_qubits = n + (n + 2)
         multout_subcirc = QuantumCircuit(

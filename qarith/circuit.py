@@ -1,4 +1,5 @@
 from qiskit import QuantumCircuit
+from qiskit import QuantumRegister
 from typing import List
 from dataclasses import dataclass
 
@@ -79,10 +80,35 @@ class Circuit:
             else:
                 self.allocation = allocation
 
-        # Create QuantumCircuit without QuantumRegister first
-        # We'll use simple integer indices to avoid register ordering issues
-        # QuantumRegister can be added later if needed for visualization
-        self.qc = QuantumCircuit(n_qubits)
+        # Create QuantumCircuit with named QuantumRegisters for better visualization
+        # Group qubits into logical registers: data, ancilla, result
+        data_qubits_count = self.allocation.data_qubits
+        ancilla_qubits_count = (
+            len(self.allocation.ancilla_qubits) if self.allocation.ancilla_qubits else 0
+        )
+
+        # Create registers with meaningful names
+        registers = []
+        if data_qubits_count > 0:
+            data_reg = QuantumRegister(data_qubits_count, "data")
+            registers.append(data_reg)
+
+        if ancilla_qubits_count > 0:
+            ancilla_reg = QuantumRegister(ancilla_qubits_count, "ancilla")
+            registers.append(ancilla_reg)
+
+        # If we have more qubits than data + ancilla, add a working register
+        working_qubits = n_qubits - data_qubits_count - ancilla_qubits_count
+        if working_qubits > 0:
+            work_reg = QuantumRegister(working_qubits, "work")
+            registers.append(work_reg)
+
+        # Create circuit with named registers
+        if registers:
+            self.qc = QuantumCircuit(*registers)
+        else:
+            # Fallback if no registers (shouldn't happen, but be safe)
+            self.qc = QuantumCircuit(n_qubits)
 
     def add(self, name: str, *qs: int, **params):
         if name == "X":

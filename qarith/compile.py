@@ -141,12 +141,13 @@ def _compile_basic(expr: Var, ctx: CompilationContext) -> Circuit:
     qubits but don't generate gates (the actual circuit is provided externally).
     """
     qubits = ctx.get_or_allocate_qubits(expr)
-    max_qubit = max(qubits) if qubits else 0
+    max_qubit = max(qubits) if qubits else -1
     allocation = QubitAllocation(
         data_qubits=max_qubit + 1, ancilla_qubits=[], expr_data_qubits=qubits
     )
-    # Circuit size needs to accommodate all qubits allocated so far
-    total_qubits = ctx.allocation.total_qubits()
+    # Circuit size only needs to accommodate this expression's qubits
+    # The actual circuit will be expanded when composed with other circuits
+    total_qubits = max_qubit + 1 if qubits else 0
     return Circuit(n_qubits=total_qubits, allocation=allocation)
 
 
@@ -156,11 +157,13 @@ def _compile_const(expr: Const, ctx: CompilationContext) -> Circuit:
     Constants are initialized to their value using X gates.
     """
     qubits = ctx.get_or_allocate_qubits(expr)
-    max_qubit = max(qubits) if qubits else 0
+    max_qubit = max(qubits) if qubits else -1
     allocation = QubitAllocation(
         data_qubits=max_qubit + 1, ancilla_qubits=[], expr_data_qubits=qubits
     )
-    total_qubits = ctx.allocation.total_qubits()
+    # Circuit size only needs to accommodate this expression's qubits
+    # The actual circuit will be expanded when composed with other circuits
+    total_qubits = max_qubit + 1 if qubits else 0
     circ = Circuit(n_qubits=total_qubits, allocation=allocation)
 
     # Initialize constant value
@@ -708,12 +711,15 @@ def _compile_pow(expr: Pow, ctx: CompilationContext) -> Circuit:
         result_qubits = ctx.get_or_allocate_qubits(expr)
         result_value = pow(base_value, exp_value, modulus)
 
+        max_qubit = max(result_qubits) if result_qubits else -1
         allocation = QubitAllocation(
-            data_qubits=max(result_qubits) + 1 if result_qubits else 0,
+            data_qubits=max_qubit + 1 if result_qubits else 0,
             ancilla_qubits=[],
             expr_data_qubits=result_qubits,
         )
-        circ = Circuit(n_qubits=ctx.allocation.total_qubits(), allocation=allocation)
+        # Circuit size only needs to accommodate this expression's qubits
+        total_qubits = max_qubit + 1 if result_qubits else 0
+        circ = Circuit(n_qubits=total_qubits, allocation=allocation)
         _init_constant(circ, result_qubits, result_value)
 
         ctx.expr_to_qubits[expr] = result_qubits
@@ -877,12 +883,15 @@ def _compile_pow_quantum_base_classical_exp(
     if exp_value == 0:
         # x^0 = 1
         result_qubits = ctx.get_or_allocate_qubits(expr)
+        max_qubit = max(result_qubits) if result_qubits else -1
         allocation = QubitAllocation(
-            data_qubits=max(result_qubits) + 1,
+            data_qubits=max_qubit + 1 if result_qubits else 0,
             ancilla_qubits=[],
             expr_data_qubits=result_qubits,
         )
-        circ = Circuit(n_qubits=ctx.allocation.total_qubits(), allocation=allocation)
+        # Circuit size only needs to accommodate this expression's qubits
+        total_qubits = max_qubit + 1 if result_qubits else 0
+        circ = Circuit(n_qubits=total_qubits, allocation=allocation)
         _init_constant(circ, result_qubits[:inner_n_bits], 1)
         ctx.expr_to_qubits[expr] = result_qubits
         return circ
